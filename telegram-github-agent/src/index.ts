@@ -84,12 +84,18 @@ async function handleMessage(chatId: number, text: string, env: Env): Promise<vo
 }
 
 async function casualReply(chatId: number, text: string, env: Env): Promise<void> {
-  const answer = await ai(env, `به پیام کوتاه کاربر به همان زبان، دوستانه و در یک یا دو جمله پاسخ بده. نیازی به بررسی ریپو نیست. پیام: ${text}`);
-  return sendTelegram(chatId, answer, env);
+  const normalized = text.toLowerCase().replace(/[؟?!،,.]+/g, " ").replace(/\s+/g, " ").trim();
+  if (normalized.includes("سلام") || normalized.includes("درود")) {
+    return sendTelegram(chatId, normalized.includes("خوبی") || normalized.includes("چطوری") ? "سلام! ممنون، خوبم. در خدمتم؛ چه کاری انجام بدهم؟" : "سلام! در خدمتم. چه کاری انجام بدهم؟", env);
+  }
+  if (/^(hi|hello|hey)$/.test(normalized)) return sendTelegram(chatId, "Hello! در خدمتم. چه کاری انجام بدهم؟", env);
+  if (normalized.includes("ممنون") || normalized.includes("مرسی")) return sendTelegram(chatId, "خواهش می‌کنم!", env);
+  return sendTelegram(chatId, "در خدمتم. چه کاری انجام بدهم؟", env);
 }
 
 function isSmallTalk(text: string): boolean {
-  return /^(سلام|درود|hello|hi|hey|خوبی|چطوری|ممنون|مرسی|صبح بخیر|شب بخیر)[؟?!.، ]*$/i.test(text);
+  const normalized = text.toLowerCase().replace(/[؟?!،,.]+/g, " ").replace(/\s+/g, " ").trim();
+  return /^(سلام|درود|hello|hi|hey|خوبی|چطوری|سلام خوبی|سلام چطوری|ممنون|مرسی|صبح بخیر|شب بخیر)$/.test(normalized);
 }
 
 async function askCode(chatId: number, question: string, env: Env): Promise<void> {
