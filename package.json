@@ -14,6 +14,8 @@
   "private": true,
   "scripts": {
     "build": "nx run-many -t build",
+    "build:telegram-agent": "pnpm --dir telegram-github-agent run typecheck",
+    "deploy:telegram-agent": "pnpm --dir telegram-github-agent exec wrangler deploy",
     "format": "oxfmt --write .",
     "format:check": "oxfmt --check .",
     "lint": "oxlint .",
