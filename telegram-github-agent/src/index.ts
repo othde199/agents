@@ -8,6 +8,7 @@ export interface Env {
   AI_MODEL?: string;
   MAX_FILE_BYTES?: string;
   ALLOWED_CHAT_IDS?: string;
+  BOT_STATE: DurableObjectNamespace;
 }
 
 type TelegramUpdate = {
@@ -31,6 +32,21 @@ export default {
     const text = update.message?.text?.trim();
     if (!chatId || !text) return json({ ok: true });
     if (!isAllowedChat(chatId, env.ALLOWED_CHAT_IDS)) return json({ ok: true });
+    const state = env.BOT_STATE.get(env.BOT_STATE.idFromName(String(chatId)));
+    if (text === "/stop") {
+      await state.fetch("https://bot-state/stop", { method: "POST" });
+      await sendTelegram(chatId, "⏸ ربات متوقف شد. برای ادامه /resume را بفرستید.", env);
+      return json({ ok: true });
+    }
+    if (text === "/resume" || text === "/start") {
+      await state.fetch("https://bot-state/resume", { method: "POST" });
+      if (text === "/resume") {
+        await sendTelegram(chatId, "▶️ ربات دوباره فعال شد.", env);
+        return json({ ok: true });
+      }
+    }
+    const stopped = (await (await state.fetch("https://bot-state/status")).json()) as { stopped?: boolean };
+    if (stopped.stopped) return json({ ok: true });
     try {
       await handleMessage(chatId, text, env);
     } catch (error) {
@@ -63,7 +79,17 @@ async function handleMessage(chatId: number, text: string, env: Env): Promise<vo
   if (text.startsWith("/ask ")) return askCode(chatId, text.slice(5).trim(), env);
   if (text === "/edit") return sendTelegram(chatId, "درخواست تغییر را بعد از /edit بنویسید.\nمثال: /edit فایل telegram-github-agent/src/index.ts را تغییر بده و ...", env);
   if (text.startsWith("/edit ")) return editCode(chatId, text.slice(6).trim(), env);
+  if (isSmallTalk(text)) return casualReply(chatId, text, env);
   return sendTelegram(chatId, "دستور ناشناخته است. /help را بزنید.", env);
+}
+
+async function casualReply(chatId: number, text: string, env: Env): Promise<void> {
+  const answer = await ai(env, `به پیام کوتاه کاربر به همان زبان، دوستانه و در یک یا دو جمله پاسخ بده. نیازی به بررسی ریپو نیست. پیام: ${text}`);
+  return sendTelegram(chatId, answer, env);
+}
+
+function isSmallTalk(text: string): boolean {
+  return /^(سلام|درود|hello|hi|hey|خوبی|چطوری|ممنون|مرسی|صبح بخیر|شب بخیر)[؟?!.، ]*$/i.test(text);
 }
 
 async function askCode(chatId: number, question: string, env: Env): Promise<void> {
@@ -112,3 +138,14 @@ function safePath(path: string): boolean { return path.length > 0 && path.length
 function stripFences(value: string): string { return value.replace(/^```json\s*/i, "").replace(/```\s*$/i, "").trim(); }
 function githubPath(path: string): string { return path.split("/").map(encodeURIComponent).join("/"); }
 function json(value: unknown, init?: ResponseInit): Response { return new Response(JSON.stringify(value), { ...init, headers: { "content-type": "application/json; charset=utf-8", ...(init?.headers ?? {}) } }); }
+
+export class BotState {
+  constructor(private readonly state: DurableObjectState) {}
+
+  async fetch(request: Request): Promise<Response> {
+    const path = new URL(request.url).pathname;
+    if (path === "/stop") await this.state.storage.put("stopped", true);
+    if (path === "/resume") await this.state.storage.put("stopped", false);
+    return json({ stopped: (await this.state.storage.get<boolean>("stopped")) ?? false });
+  }
+}
