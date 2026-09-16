@@ -23,6 +23,7 @@ export default {
     const url = new URL(request.url);
     if (request.method === "GET" && url.pathname === "/") return json({ ok: true, service: "telegram-github-agent" });
     if (request.method === "GET" && url.pathname === "/health") return json({ ok: true });
+    if (request.method === "GET" && url.pathname === "/setup-webhook") return setupWebhook(url, env);
     if (request.method !== "POST" || url.pathname !== "/telegram/webhook") return new Response("Not found", { status: 404 });
     if (env.TELEGRAM_WEBHOOK_SECRET && request.headers.get("X-Telegram-Bot-Api-Secret-Token") !== env.TELEGRAM_WEBHOOK_SECRET) return new Response("Unauthorized", { status: 401 });
     const update = (await request.json()) as TelegramUpdate;
@@ -39,6 +40,20 @@ export default {
     return json({ ok: true });
   }
 };
+
+async function setupWebhook(url: URL, env: Env): Promise<Response> {
+  if (!env.TELEGRAM_WEBHOOK_SECRET || url.searchParams.get("key") !== env.TELEGRAM_WEBHOOK_SECRET) {
+    return new Response("Unauthorized", { status: 401 });
+  }
+  const webhookUrl = `${url.origin}/telegram/webhook`;
+  const response = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/setWebhook`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ url: webhookUrl, secret_token: env.TELEGRAM_WEBHOOK_SECRET })
+  });
+  const result = await response.json();
+  return json({ webhookUrl, telegram: result });
+}
 
 async function handleMessage(chatId: number, text: string, env: Env): Promise<void> {
   if (text === "/start" || text === "/help") return sendTelegram(chatId, HELP, env);
