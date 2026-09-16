@@ -11,13 +11,10 @@ export interface Env {
   BOT_STATE: DurableObjectNamespace;
 }
 
-type TelegramUpdate = {
-  message?: { chat: { id: number }; text?: string; from?: { id: number } };
-};
-
+type TelegramUpdate = { message?: { chat: { id: number }; text?: string; from?: { id: number } } };
 type GithubFile = { content: string; sha: string; encoding: string; size: number };
 
-const HELP = `دستورات ربات:\n/status — وضعیت اتصال\n/repo — ریپوزیتوری فعال\n/ask <سؤال> — پرسش درباره کد\n/edit <درخواست> — پیشنهاد تغییر و ساخت commit\n\nنمونه:\n/edit فایل agent-think/src/index.ts را طوری تغییر بده که ...`;
+const HELP = `من یک ایجنت هوش مصنوعی هستم و می‌توانم درباره پروژه، برنامه‌نویسی و موضوعات عمومی پاسخ بدهم. برای اطلاعات جدید، وب را هم جست‌وجو می‌کنم.\n\nدستورات مدیریتی:\n/status — وضعیت اتصال\n/repo — ریپوزیتوری فعال\n/ask <سؤال> — سؤال از ایجنت\n/edit <درخواست> — تحلیل و ثبت تغییر کد\n/stop — توقف پاسخ‌گویی\n/resume — ادامه فعالیت\n\nمی‌توانید سؤال را بدون /ask هم بفرستید.`;
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -30,8 +27,7 @@ export default {
     const update = (await request.json()) as TelegramUpdate;
     const chatId = update.message?.chat.id;
     const text = update.message?.text?.trim();
-    if (!chatId || !text) return json({ ok: true });
-    if (!isAllowedChat(chatId, env.ALLOWED_CHAT_IDS)) return json({ ok: true });
+    if (!chatId || !text || !isAllowedChat(chatId, env.ALLOWED_CHAT_IDS)) return json({ ok: true });
     const state = env.BOT_STATE.get(env.BOT_STATE.idFromName(String(chatId)));
     if (text === "/stop") {
       await state.fetch("https://bot-state/stop", { method: "POST" });
@@ -47,9 +43,7 @@ export default {
     }
     const stopped = (await (await state.fetch("https://bot-state/status")).json()) as { stopped?: boolean };
     if (stopped.stopped) return json({ ok: true });
-    try {
-      await handleMessage(chatId, text, env);
-    } catch (error) {
+    try { await handleMessage(chatId, text, env); } catch (error) {
       console.error("telegram handler failed", error);
       await sendTelegram(chatId, "❌ اجرای درخواست شکست خورد. لاگ Worker را بررسی کنید.", env);
     }
@@ -58,17 +52,10 @@ export default {
 };
 
 async function setupWebhook(url: URL, env: Env): Promise<Response> {
-  if (!env.TELEGRAM_WEBHOOK_SECRET || url.searchParams.get("key") !== env.TELEGRAM_WEBHOOK_SECRET) {
-    return new Response("Unauthorized", { status: 401 });
-  }
+  if (!env.TELEGRAM_WEBHOOK_SECRET || url.searchParams.get("key") !== env.TELEGRAM_WEBHOOK_SECRET) return new Response("Unauthorized", { status: 401 });
   const webhookUrl = `${url.origin}/telegram/webhook`;
-  const response = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/setWebhook`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ url: webhookUrl, secret_token: env.TELEGRAM_WEBHOOK_SECRET })
-  });
-  const result = await response.json();
-  return json({ webhookUrl, telegram: result });
+  const response = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/setWebhook`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ url: webhookUrl, secret_token: env.TELEGRAM_WEBHOOK_SECRET }) });
+  return json({ webhookUrl, telegram: await response.json() });
 }
 
 async function handleMessage(chatId: number, text: string, env: Env): Promise<void> {
@@ -76,35 +63,45 @@ async function handleMessage(chatId: number, text: string, env: Env): Promise<vo
   if (text === "/status") return sendTelegram(chatId, `✅ فعال\nریپو: ${env.GITHUB_REPO}\nشاخه: ${env.GITHUB_DEFAULT_BRANCH}\nمدل: ${env.AI_MODEL ?? "پیش‌فرض"}`, env);
   if (text === "/repo") return sendTelegram(chatId, `ریپوزیتوری فعال: https://github.com/${env.GITHUB_REPO}\nشاخه: ${env.GITHUB_DEFAULT_BRANCH}`, env);
   if (text === "/ask") return sendTelegram(chatId, "سؤال را بعد از /ask بنویسید.\nمثال: /ask ساختار این پروژه چیست؟", env);
-  if (text.startsWith("/ask ")) return askCode(chatId, text.slice(5).trim(), env);
-  if (text === "/edit") return sendTelegram(chatId, "درخواست تغییر را بعد از /edit بنویسید.\nمثال: /edit فایل telegram-github-agent/src/index.ts را تغییر بده و ...", env);
+  if (text.startsWith("/ask ")) return agentReply(chatId, text.slice(5).trim(), env);
+  if (text === "/edit") return sendTelegram(chatId, "درخواست تغییر را بعد از /edit بنویسید.", env);
   if (text.startsWith("/edit ")) return editCode(chatId, text.slice(6).trim(), env);
-  if (isSmallTalk(text)) return casualReply(chatId, text, env);
-  return sendTelegram(chatId, "دستور ناشناخته است. /help را بزنید.", env);
+  return agentReply(chatId, text, env);
 }
 
-async function casualReply(chatId: number, text: string, env: Env): Promise<void> {
-  const normalized = text.toLowerCase().replace(/[؟?!،,.]+/g, " ").replace(/\s+/g, " ").trim();
-  if (normalized.includes("سلام") || normalized.includes("درود")) {
-    return sendTelegram(chatId, normalized.includes("خوبی") || normalized.includes("چطوری") ? "سلام! ممنون، خوبم. در خدمتم؛ چه کاری انجام بدهم؟" : "سلام! در خدمتم. چه کاری انجام بدهم؟", env);
-  }
-  if (/^(hi|hello|hey)$/.test(normalized)) return sendTelegram(chatId, "Hello! در خدمتم. چه کاری انجام بدهم؟", env);
-  if (normalized.includes("ممنون") || normalized.includes("مرسی")) return sendTelegram(chatId, "خواهش می‌کنم!", env);
-  return sendTelegram(chatId, "در خدمتم. چه کاری انجام بدهم؟", env);
-}
-
-function isSmallTalk(text: string): boolean {
-  const normalized = text.toLowerCase().replace(/[؟?!،,.]+/g, " ").replace(/\s+/g, " ").trim();
-  return /^(سلام|درود|hello|hi|hey|خوبی|چطوری|سلام خوبی|سلام چطوری|ممنون|مرسی|صبح بخیر|شب بخیر)$/.test(normalized);
-}
-
-async function askCode(chatId: number, question: string, env: Env): Promise<void> {
-  if (!question) return sendTelegram(chatId, "سؤال را بعد از /ask بنویسید.", env);
-  await sendTelegram(chatId, "⏳ در حال بررسی فایل‌های ریپو...", env);
-  const tree = await github(`/repos/${env.GITHUB_REPO}/git/trees/${encodeURIComponent(env.GITHUB_DEFAULT_BRANCH)}?recursive=1`, env) as { tree?: { path: string; type: string }[] };
-  const paths = (tree.tree ?? []).filter(x => x.type === "blob").slice(0, 80).map(x => x.path).join("\n");
-  const answer = await ai(env, `به فارسی کوتاه و دقیق پاسخ بده. این فهرست فایل‌های ریپو است:\n${paths}\n\nسؤال کاربر: ${question}`);
+async function agentReply(chatId: number, question: string, env: Env): Promise<void> {
+  if (!question) return sendTelegram(chatId, "سؤال خالی است.", env);
+  await sendTelegram(chatId, "⏳ در حال فکر کردن...", env);
+  const repoContext = needsRepo(question) ? await projectContext(env) : "";
+  const webContext = needsWeb(question) ? await webSearch(question) : "";
+  const answer = await ai(env, `تو یک ایجنت عمومی و دستیار برنامه‌نویسی هستی. به فارسی و دقیق جواب بده؛ اگر سؤال انگلیسی بود می‌توانی انگلیسی جواب بدهی. اگر اطلاعات کافی نیست صادقانه بگو. از context زیر استفاده کن و ادعای بدون منبع نکن.\n\n${repoContext}\n${webContext}\nسؤال کاربر: ${question}`);
   return sendTelegram(chatId, answer, env);
+}
+
+function needsRepo(question: string): boolean { return /پروژه|ریپو|کد|فایل|گیت.?هاب|repo|code|file|github|worker|agents|package|wrangler|typescript|javascript|ساختار/i.test(question); }
+function needsWeb(question: string): boolean { return /اینترنت|وب|جست.?جو|آخرین|جدیدترین|امروز|قیمت|خبر|نسخه جدید|مستندات|internet|web|search|latest|today|news|price|documentation|۲۰۲|202[4-9]|https?:\/\//i.test(question); }
+
+async function projectContext(env: Env): Promise<string> {
+  const tree = await github(`/repos/${env.GITHUB_REPO}/git/trees/${encodeURIComponent(env.GITHUB_DEFAULT_BRANCH)}?recursive=1`, env) as { tree?: { path: string; type: string }[] };
+  const files = (tree.tree ?? []).filter(x => x.type === "blob").map(x => x.path);
+  const selected = files.filter(path => /(^|\/)(README|package\.json|wrangler\.jsonc?|tsconfig\.json|src\/index\.ts|src\/agent\.ts|\.md$)/i.test(path)).slice(0, 6);
+  const snippets: string[] = [];
+  for (const path of selected) {
+    try {
+      const file = await github(`/repos/${env.GITHUB_REPO}/contents/${githubPath(path)}?ref=${encodeURIComponent(env.GITHUB_DEFAULT_BRANCH)}`, env) as GithubFile;
+      if (file.content && file.size < 30000) snippets.push(`FILE: ${path}\n${decodeGithub(file.content)}`);
+    } catch { /* continue with other files */ }
+  }
+  return `PROJECT FILE LIST:\n${files.slice(0, 120).join("\n")}\n\nRELEVANT FILES:\n${snippets.join("\n\n")}`;
+}
+
+async function webSearch(question: string): Promise<string> {
+  try {
+    const response = await fetch(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(question)}`, { headers: { "user-agent": "telegram-github-agent/1.0" } });
+    const html = await response.text();
+    const results = [...html.matchAll(/result__a[^>]*href="([^"]+)"[^>]*>(.*?)<\/a>/g)].slice(0, 5).map(match => `${stripHtml(match[2])}: ${match[1]}`);
+    return results.length ? `WEB SEARCH RESULTS (verify before relying):\n${results.join("\n")}` : "WEB SEARCH: no results found";
+  } catch { return "WEB SEARCH: unavailable; پاسخ را بر اساس دانش عمومی بده و بگو جست‌وجوی زنده در دسترس نبود."; }
 }
 
 async function editCode(chatId: number, instruction: string, env: Env): Promise<void> {
@@ -117,15 +114,12 @@ async function editCode(chatId: number, instruction: string, env: Env): Promise<
   if (!safePath(parsed.path) || parsed.content.length > Number(env.MAX_FILE_BYTES ?? 120000)) return sendTelegram(chatId, "این مسیر یا اندازه فایل مجاز نیست.", env);
   const filePath = githubPath(parsed.path);
   const current = await github(`/repos/${env.GITHUB_REPO}/contents/${filePath}?ref=${encodeURIComponent(env.GITHUB_DEFAULT_BRANCH)}`, env) as GithubFile;
-  const result = await github(`/repos/${env.GITHUB_REPO}/contents/${filePath}`, env, {
-    method: "PUT",
-    body: JSON.stringify({ message: `feat(bot): ${parsed.summary ?? "update requested from Telegram"}`.slice(0, 120), content: btoa(unescape(encodeURIComponent(parsed.content))), sha: current.sha, branch: env.GITHUB_DEFAULT_BRANCH })
-  }) as { commit?: { html_url?: string } };
+  const result = await github(`/repos/${env.GITHUB_REPO}/contents/${filePath}`, env, { method: "PUT", body: JSON.stringify({ message: `feat(bot): ${parsed.summary ?? "update requested from Telegram"}`.slice(0, 120), content: btoa(unescape(encodeURIComponent(parsed.content))), sha: current.sha, branch: env.GITHUB_DEFAULT_BRANCH }) }) as { commit?: { html_url?: string } };
   return sendTelegram(chatId, `✅ تغییر در گیت‌هاب ثبت شد.\nفایل: ${parsed.path}\n${parsed.summary ?? ""}\nCommit: ${result.commit?.html_url ?? "ثبت شد"}`, env);
 }
 
 async function ai(env: Env, prompt: string): Promise<string> {
-  const result = await env.AI.run(env.AI_MODEL ?? "@cf/meta/llama-3.2-1b-instruct", { messages: [{ role: "system", content: "پاسخ کوتاه بده و هرگز secret تولید یا افشا نکن." }, { role: "user", content: prompt }], max_tokens: 1200 }) as { response?: string };
+  const result = await env.AI.run(env.AI_MODEL ?? "@cf/meta/llama-3.2-1b-instruct", { messages: [{ role: "system", content: "تو یک دستیار مفید هستی. هرگز secret تولید یا افشا نکن." }, { role: "user", content: prompt }], max_tokens: 1200 }) as { response?: string };
   return result.response ?? "پاسخی دریافت نشد.";
 }
 
@@ -142,12 +136,13 @@ async function sendTelegram(chatId: number, text: string, env: Env): Promise<voi
 function isAllowedChat(chatId: number, allow?: string): boolean { return !allow || allow.split(",").map(x => x.trim()).includes(String(chatId)); }
 function safePath(path: string): boolean { return path.length > 0 && path.length < 240 && !path.startsWith("/") && !path.includes("..") && !path.startsWith(".github/workflows/") && !path.endsWith(".env"); }
 function stripFences(value: string): string { return value.replace(/^```json\s*/i, "").replace(/```\s*$/i, "").trim(); }
+function stripHtml(value: string): string { return value.replace(/<[^>]+>/g, "").replace(/&amp;/g, "&").replace(/&#x27;/g, "'").trim(); }
 function githubPath(path: string): string { return path.split("/").map(encodeURIComponent).join("/"); }
+function decodeGithub(value: string): string { const bytes = Uint8Array.from(atob(value.replace(/\s/g, "")), char => char.charCodeAt(0)); return new TextDecoder().decode(bytes); }
 function json(value: unknown, init?: ResponseInit): Response { return new Response(JSON.stringify(value), { ...init, headers: { "content-type": "application/json; charset=utf-8", ...(init?.headers ?? {}) } }); }
 
 export class BotState {
   constructor(private readonly state: DurableObjectState) {}
-
   async fetch(request: Request): Promise<Response> {
     const path = new URL(request.url).pathname;
     if (path === "/stop") await this.state.storage.put("stopped", true);
