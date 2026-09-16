@@ -59,7 +59,9 @@ async function handleMessage(chatId: number, text: string, env: Env): Promise<vo
   if (text === "/start" || text === "/help") return sendTelegram(chatId, HELP, env);
   if (text === "/status") return sendTelegram(chatId, `✅ فعال\nریپو: ${env.GITHUB_REPO}\nشاخه: ${env.GITHUB_DEFAULT_BRANCH}\nمدل: ${env.AI_MODEL ?? "پیش‌فرض"}`, env);
   if (text === "/repo") return sendTelegram(chatId, `ریپوزیتوری فعال: https://github.com/${env.GITHUB_REPO}\nشاخه: ${env.GITHUB_DEFAULT_BRANCH}`, env);
+  if (text === "/ask") return sendTelegram(chatId, "سؤال را بعد از /ask بنویسید.\nمثال: /ask ساختار این پروژه چیست؟", env);
   if (text.startsWith("/ask ")) return askCode(chatId, text.slice(5).trim(), env);
+  if (text === "/edit") return sendTelegram(chatId, "درخواست تغییر را بعد از /edit بنویسید.\nمثال: /edit فایل telegram-github-agent/src/index.ts را تغییر بده و ...", env);
   if (text.startsWith("/edit ")) return editCode(chatId, text.slice(6).trim(), env);
   return sendTelegram(chatId, "دستور ناشناخته است. /help را بزنید.", env);
 }
