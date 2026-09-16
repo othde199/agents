@@ -1,0 +1,71 @@
+# ربات تلگرام برای کار با GitHub و Cloudflare Workers
+
+این پروژه یک Worker مستقل و سبک است که روی پلن رایگان Cloudflare قابل اجراست. ربات از طریق **Telegram webhook** پیام می‌گیرد، برای پاسخ‌های کوتاه از **Workers AI** استفاده می‌کند و با **GitHub Contents API** فایل را می‌خواند و commit می‌کند.
+
+## چرا نمونه `agent-think` مستقیماً deploy نشده است؟
+
+نمونه `agent-think` موجود در این ریپو برای بازتولید issue و اجرای کد به Container، چند Durable Object، R2 و warm pool متکی است. این اجزا برای نیاز فعلی ربات تلگرام ضروری نیستند و برای حساب رایگان انتخاب مناسبی نیستند. Worker این پوشه عمداً بدون Container، D1، KV، R2، Cron و polling نوشته شده است.
+
+## سکرت‌های لازم در Cloudflare
+
+در مسیر **Workers & Pages → telegram-github-agent → Settings → Variables and Secrets** این موارد را به‌صورت **Encrypted secret** بسازید:
+
+| نام | مقدار | سطح دسترسی پیشنهادی |
+|---|---|---|
+| `TELEGRAM_BOT_TOKEN` | توکن BotFather | فقط secret |
+| `TELEGRAM_WEBHOOK_SECRET` | یک رشته تصادفی حداقل 32 کاراکتری | فقط secret |
+| `GITHUB_TOKEN` | Fine-grained PAT | فقط secret؛ فقط ریپوی هدف |
+
+متغیرهای غیرحساس داخل `wrangler.jsonc` هستند: `GITHUB_REPO`، `GITHUB_DEFAULT_BRANCH`، `AI_MODEL` و `MAX_FILE_BYTES`.
+
+### ساخت GitHub Token
+
+یک **Fine-grained personal access token** بسازید، آن را فقط به `othde199/agents` یا ریپوی موردنظر محدود کنید و حداقل مجوزها را بدهید:
+
+- `Contents: Read and write`
+- برای نسخه فعلی ربات نیازی به Issues، Actions، Secrets یا Administration نیست.
+
+توکن را در کد، `wrangler.jsonc` یا چت تلگرام قرار ندهید.
+
+## نصب و انتشار
+
+```bash
+cd telegram-github-agent
+pnpm install
+pnpm exec wrangler login
+pnpm exec wrangler secret put TELEGRAM_BOT_TOKEN
+pnpm exec wrangler secret put TELEGRAM_WEBHOOK_SECRET
+pnpm exec wrangler secret put GITHUB_TOKEN
+pnpm run typecheck
+pnpm run deploy
+```
+
+بعد از deploy، آدرس Worker را بردارید و وبهوک را فقط یک‌بار تنظیم کنید:
+
+```bash
+curl -X POST "https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/setWebhook" \
+  -d "url=https://telegram-github-agent.<ACCOUNT>.workers.dev/telegram/webhook" \
+  -d "secret_token=<TELEGRAM_WEBHOOK_SECRET>"
+```
+
+برای محدود کردن ربات به چت خودتان، شناسه عددی چت را به‌صورت secret یا variable با نام `ALLOWED_CHAT_IDS` ثبت کنید؛ برای چند چت از کاما استفاده کنید.
+
+## دستورات
+
+- `/start` و `/help`
+- `/status`
+- `/repo`
+- `/ask سؤال`
+- `/edit درخواست تغییر`
+
+در نسخه فعلی `/edit` مستقیماً یک فایل موجود را با commit روی شاخه پیش‌فرض به‌روزرسانی می‌کند. برای محیط حساس، بهتر است در گام بعدی ساخت branch و Pull Request، تأیید دو مرحله‌ای و تست قبل از merge اضافه شود.
+
+## نکات امنیتی مهم
+
+این نسخه فقط مسیر فایل‌های معمولی را می‌پذیرد، `.env` و `.github/workflows` را مسدود می‌کند، اندازه فایل را محدود می‌کند و به چت‌های مجاز محدودشدنی است. با این حال، چون `/edit` می‌تواند commit بسازد، **توکن GitHub را با دسترسی بیشتر از Contents ندهید** و `ALLOWED_CHAT_IDS` را تنظیم کنید.
+
+## محدودیت‌های پلن رایگان
+
+طبق مستندات رسمی Cloudflare، Workers Free شامل ۱۰۰٬۰۰۰ درخواست در روز، ۱۰ میلی‌ثانیه CPU برای هر invocation، ۵۰ subrequest در هر invocation و حداکثر ۱۲۸MB حافظه است. Workers AI نیز ۱۰٬۰۰۰ Neurons رایگان در روز دارد. بنابراین این پروژه برای استفاده شخصی و پیام‌های کم‌حجم مناسب است؛ برای ریپوی بزرگ، context کامل را به مدل نمی‌فرستد و در هر پرسش فقط فهرست محدودی از فایل‌ها را می‌خواند.
+
+برای جلوگیری از هزینه ناخواسته، در این Worker هیچ binding پولی، سرویس بیرونی اجباری، cron یا Container فعال نشده است. اگر سهمیه Workers AI روزانه تمام شود، پاسخ‌های AI تا reset روزانه کار نمی‌کنند، اما خود Worker و GitHub API همچنان از نظر کد مستقل هستند.

@@ -1,4 +1,5 @@
 packages:
+  - "telegram-github-agent"
   - "agent-think"
   - "examples/*"
   - "!examples/next"
