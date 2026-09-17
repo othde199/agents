@@ -1,4 +1,4 @@
-import { skillsPrompt, SKILL_ROUTER_INSTRUCTION } from "./skills";
+import { skillsPrompt, SKILL_ROUTER_INSTRUCTION, CODING_AGENT_INSTRUCTION } from "./skills";
 
 export interface Env {
   AI: Ai;
@@ -425,7 +425,7 @@ async function editCode(chatId: number, instruction: string, env: Env): Promise<
   const currentContent = located?.path === requestedPath ? located.content : decodeGithub(current.content);
   const deterministic = applyDeterministicEdit(requestedPath, currentContent, instruction);
   const textEdit = applyTextReplacement(currentContent, instruction);
-  const plan = deterministic ? JSON.stringify({ path: requestedPath, content: deterministic.content, summary: deterministic.summary }) : textEdit ? JSON.stringify({ path: requestedPath, content: textEdit.content, summary: textEdit.summary }) : await ai(repoEnv, `فقط یک JSON معتبر و بدون markdown برگردان؛ هیچ توضیحی بیرون JSON ننویس. شکل دقیق: {"path":"${requestedPath}","content":"کل محتوای کامل جدید فایل","summary":"خلاصه کوتاه فارسی"}. مسیر فایل دقیقاً باید ${requestedPath} باشد و content هرگز نباید placeholder باشد.\nمحتوای فعلی فایل:\n${currentContent.slice(0, 50000)}\nدرخواست کاربر: ${instruction}`);
+  const plan = deterministic ? JSON.stringify({ path: requestedPath, content: deterministic.content, summary: deterministic.summary }) : textEdit ? JSON.stringify({ path: requestedPath, content: textEdit.content, summary: textEdit.summary }) : await ai(repoEnv, `${CODING_AGENT_INSTRUCTION}\nفقط یک JSON معتبر و بدون markdown برگردان؛ هیچ توضیحی بیرون JSON ننویس. شکل دقیق: {"path":"${requestedPath}","content":"کل محتوای کامل جدید فایل","summary":"خلاصه کوتاه فارسی"}. مسیر فایل دقیقاً باید ${requestedPath} باشد و content هرگز نباید placeholder باشد.\nمحتوای فعلی فایل:\n${currentContent.slice(0, 50000)}\nدرخواست کاربر: ${instruction}`);
   let parsed: { path?: string; content?: string; summary?: string };
   try { parsed = JSON.parse(extractJson(String(plan))); } catch { return sendTelegram(chatId, `مدل نتوانست تغییر فایل را به شکل معتبر تولید کند. محتوای فایل تغییر نکرد.\n${String(plan).slice(0, 1200)}`, env); }
   if (!parsed.path || typeof parsed.content !== "string") return sendTelegram(chatId, "درخواست مبهم است؛ نام دقیق فایل و تغییر موردنظر را بنویسید.", env);
@@ -456,7 +456,7 @@ async function chooseFileForInstruction(env: Env, branch: string, instruction: s
   try { tree = await github(`/repos/${env.GITHUB_REPO}/git/trees/${encodeURIComponent(branch)}?recursive=1`, env) as { tree?: { path: string; type: string; size?: number }[] }; } catch { return undefined; }
   const files = (tree.tree ?? []).filter(item => item.type === "blob" && (item.size ?? 0) < 120000 && /\.(tsx?|jsx?|vue|svelte|html|css|scss|md|json)$/i.test(item.path) && !/(node_modules|dist|build|coverage|\.lock$)/i.test(item.path)).map(item => item.path).slice(0, 120);
   if (!files.length) return undefined;
-  const answer = await ai(env, `از فهرست فایل‌های واقعی زیر، مناسب‌ترین فایل برای اجرای درخواست کاربر را انتخاب کن. فقط JSON معتبر برگردان: {"path":"مسیر دقیق فایل یا null"}. اگر درخواست به چند فایل مربوط است، بهترین فایل شروع را انتخاب کن. حدس خارج از فهرست نزن.\nفهرست:\n${files.join("\n")}\nدرخواست: ${instruction}`);
+  const answer = await ai(env, `${CODING_AGENT_INSTRUCTION}\nاز فهرست فایل‌های واقعی زیر، مناسب‌ترین فایل برای اجرای درخواست کاربر را انتخاب کن. فقط JSON معتبر برگردان: {"path":"مسیر دقیق فایل یا null"}. اگر درخواست به چند فایل مربوط است، بهترین فایل شروع را انتخاب کن. حدس خارج از فهرست نزن.\nفهرست:\n${files.join("\n")}\nدرخواست: ${instruction}`);
   try {
     const parsed = JSON.parse(extractJson(answer)) as { path?: string | null };
     return parsed.path && files.includes(parsed.path) ? parsed.path : undefined;
