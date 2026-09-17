@@ -177,7 +177,7 @@ async function agentReply(chatId: number, question: string, env: Env): Promise<v
   const repoEnv = await resolveRepoEnv(activeEnv);
   const repoContext = needsRepo(question) ? await projectContext(repoEnv) : "";
   const webContext = needsWeb(question) ? await webSearch(question) : "";
-  const freshnessRule = needsWeb(question) ? "این سؤال به اطلاعات زنده نیاز دارد. فقط از WEB SEARCH AND PAGE CONTENT یا WEB SEARCH RESULTS استفاده کن؛ اگر منبع زنده وجود ندارد، صریح بگو نتوانستم اطلاعات به‌روز را تأیید کنم و هرگز از حافظه مدل عدد یا نسخه حدس نزن." : "";
+  const freshnessRule = needsWeb(question) ? "این سؤال به اطلاعات زنده نیاز دارد. فقط از WEB SEARCH AND PAGE CONTENT یا WEB SEARCH RESULTS استفاده کن. فقط وقتی نسخه یا عدد دقیق اعلام کن که همان مقدار صریحاً در متن منبع آمده باشد؛ از حافظه مدل حدس نزن. اگر منبع کافی نیست، دقیقاً بگو «نتوانستم اطلاعات به‌روز و قابل‌اعتماد را تأیید کنم» و هرگز کاربر را دوباره به جست‌وجو یا سایت دیگری ارجاع نده." : "";
   const prompt = `تو یک ایجنت عمومی و دستیار برنامه‌نویسی هستی. به فارسی و دقیق جواب بده؛ اگر سؤال انگلیسی بود می‌توانی انگلیسی جواب بدهی. اگر اطلاعات کافی نیست صادقانه بگو. از context زیر و حافظه استفاده کن.\n\n${freshnessRule}\nریپوی زمینه: ${repoEnv.GITHUB_REPO}\nپروژه فعال: ${memory.activeProject}\nخلاصه حافظه: ${memory.project.summary}\nترجیحات کاربر: ${memory.project.preferences.join(" | ")}\n${repoContext}\n${webContext}\nسؤال کاربر: ${question}`;
   const answer = await ai(repoEnv, prompt, memory.project.history);
   await appendMemory(state, { role: "user", content: question }, { role: "assistant", content: answer });
@@ -329,18 +329,27 @@ async function searchResultUrls(question: string): Promise<string[]> {
 }
 
 async function searchResultDetails(question: string): Promise<{ url: string; title: string; snippet: string }[]> {
-  const response = await fetch(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(question)}`, { headers: { "user-agent": "telegram-github-agent/1.0" } });
-  const html = await response.text();
-  const matches = [...html.matchAll(/result__a[^>]*href="([^"]+)"[^>]*>(.*?)<\/a>/g)].slice(0, 6);
-  return matches.map(match => {
+  const queries = [question, translateSearchQuery(question)].filter((value, index, all) => value && all.indexOf(value) === index);
+  const allResults: { url: string; title: string; snippet: string }[] = [];
+  for (const query of queries.slice(0, 2)) {
+    const response = await fetch(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`, { headers: { "user-agent": "telegram-github-agent/1.0" } });
+    const html = await response.text();
+    const matches = [...html.matchAll(/result__a[^>]*href="([^"]+)"[^>]*>(.*?)<\/a>/g)].slice(0, 6);
+    allResults.push(...matches.map(match => {
     const raw = match[1].replace(/&amp;/g, "&");
     let url = raw;
     try { url = new URL(raw, "https://html.duckduckgo.com").searchParams.get("uddg") ?? raw; } catch { /* keep raw */ }
     const start = match.index ?? 0;
     const following = html.slice(start, start + 5000);
     const snippetMatch = following.match(/result__snippet[^>]*>([\s\S]*?)<\//i);
-    return { url, title: stripHtml(match[2]), snippet: stripHtml(snippetMatch?.[1] ?? "") };
-  }).filter(item => /^https?:\/\//i.test(item.url));
+      return { url, title: stripHtml(match[2]), snippet: stripHtml(snippetMatch?.[1] ?? "") };
+    }).filter(item => /^https?:\/\//i.test(item.url)));
+  }
+  return allResults.filter((item, index, all) => all.findIndex(other => other.url === item.url) === index);
+}
+
+function translateSearchQuery(question: string): string {
+  return question.replace(/اخرین|آخرین/gi, "latest").replace(/ورژن|نسخه/gi, "version").replace(/بازی/gi, "game").replace(/پابجی/gi, "PUBG").replace(/موبایل/gi, "Mobile").replace(/ویندوز|کامپیوتر|پی.?سی/gi, "PC Windows").replace(/چیه|چیست|چی هست/gi, "what is");
 }
 
 async function fetchPageText(url: string): Promise<string> {
