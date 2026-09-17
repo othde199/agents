@@ -17,7 +17,24 @@ type ConversationMessage = { role: "user" | "assistant"; content: string };
 type ProjectMemory = { history: ConversationMessage[]; summary: string; preferences: string[] };
 type MemoryStore = { activeProject: string; repo?: string; projects: Record<string, ProjectMemory> };
 
-const HELP = `🤖 Agent Think — نسخه Free\n\nپیام را مستقیم بفرست؛ Agent خودش تصمیم می‌گیرد آیا جست‌وجوی وب لازم است یا نه.\n\n/search <عبارت> — جست‌وجوی اجباری وب\n/repo owner/name — ذخیره ریپو برای زمینه پاسخ\n/repo — نمایش ریپوی ذخیره‌شده\n/status — وضعیت Worker\n/clear — پاک‌کردن ریپوی ذخیره‌شده؛ ریپوزیتوری GitHub حذف نمی‌شود\n/ask <سؤال> — پرسش از ایجنت\n/project <نام> — انتخاب حافظه جدا برای پروژه\n/remember <نکته> — ذخیره ترجیح در حافظه بلندمدت\n/history <عبارت> — جست‌وجو در تاریخچه مکالمه\n/clear-memory — پاک‌کردن حافظه مکالمه پروژه فعال\n/stop — توقف پاسخ‌گویی\n/resume — ادامه فعالیت`;
+const HELP = `🤖 Agent Think — نسخه Free\n\nپیام را مستقیم بفرست؛ Agent خودش تصمیم می‌گیرد آیا بررسی پروژه یا جست‌وجوی وب لازم است.\n\nدستورات اصلی:\n/ask <سؤال> — پرسش از ایجنت\n/search <عبارت> — جست‌وجوی اجباری وب\n/repo owner/name — ذخیره ریپو برای زمینه پاسخ\n/repo — نمایش ریپوی ذخیره‌شده\n/status — وضعیت Worker\n\nمدیریت حافظه:\n/project <نام> — انتخاب حافظه جدا برای پروژه\n/remember <نکته> — ذخیره ترجیح در حافظه بلندمدت\n/history <عبارت> — جست‌وجو در تاریخچه مکالمه\n/clear-memory — پاک‌کردن حافظه پروژه فعال\n/clear — پاک‌کردن ریپوی ذخیره‌شده؛ ریپوزیتوری GitHub حذف نمی‌شود\n\nکنترل ربات:\n/stop — توقف پاسخ‌گویی\n/resume — ادامه فعالیت\n/help — نمایش این راهنما\n\nبرای تغییر کد، از /edit <درخواست> استفاده کنید.`;
+
+const TELEGRAM_COMMANDS = [
+  { command: "start", description: "شروع و نمایش راهنما" },
+  { command: "help", description: "نمایش راهنمای کامل" },
+  { command: "ask", description: "پرسش از ایجنت" },
+  { command: "search", description: "جست‌وجوی اجباری وب" },
+  { command: "repo", description: "نمایش یا ذخیره ریپو" },
+  { command: "status", description: "وضعیت Worker" },
+  { command: "project", description: "انتخاب پروژه و حافظه جدا" },
+  { command: "remember", description: "ذخیره ترجیح در حافظه" },
+  { command: "history", description: "جست‌وجو در تاریخچه" },
+  { command: "clear", description: "پاک‌کردن ریپوی ذخیره‌شده" },
+  { command: "clear_memory", description: "پاک‌کردن حافظه مکالمه" },
+  { command: "stop", description: "توقف پاسخ‌گویی" },
+  { command: "resume", description: "ادامه فعالیت" },
+  { command: "edit", description: "درخواست تغییر کد" }
+];
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -58,7 +75,9 @@ async function setupWebhook(url: URL, env: Env): Promise<Response> {
   if (!env.TELEGRAM_WEBHOOK_SECRET || url.searchParams.get("key") !== env.TELEGRAM_WEBHOOK_SECRET) return new Response("Unauthorized", { status: 401 });
   const webhookUrl = `${url.origin}/telegram/webhook`;
   const response = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/setWebhook`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ url: webhookUrl, secret_token: env.TELEGRAM_WEBHOOK_SECRET }) });
-  return json({ webhookUrl, telegram: await response.json() });
+  const webhookResult = await response.json();
+  const commandsResponse = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/setMyCommands`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ commands: TELEGRAM_COMMANDS }) });
+  return json({ webhookUrl, telegram: webhookResult, commands: await commandsResponse.json() });
 }
 
 async function handleMessage(chatId: number, text: string, env: Env): Promise<void> {
@@ -75,7 +94,7 @@ async function handleMessage(chatId: number, text: string, env: Env): Promise<vo
   if (text === "/history") return sendTelegram(chatId, "عبارت جست‌وجو را بعد از /history بنویسید.", env);
   if (text.startsWith("/history ")) return searchHistory(chatId, text.slice(9).trim(), env);
   if (text === "/clear") return clearSavedRepo(chatId, env);
-  if (text === "/clear-memory") return clearConversation(chatId, env);
+  if (text === "/clear-memory" || text === "/clear_memory") return clearConversation(chatId, env);
   if (text === "/ask") return sendTelegram(chatId, "سؤال را بعد از /ask بنویسید.\nمثال: /ask ساختار این پروژه چیست؟", env);
   if (text.startsWith("/ask ")) return agentReply(chatId, text.slice(5).trim(), env);
   if (text === "/edit") return sendTelegram(chatId, "درخواست تغییر را بعد از /edit بنویسید.", env);
