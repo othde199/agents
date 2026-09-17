@@ -147,6 +147,7 @@ async function handleMessage(chatId: number, text: string, env: Env): Promise<vo
   if (text.startsWith("/ask ")) return agentReply(chatId, text.slice(5).trim(), env);
   if (text === "/edit") return sendTelegram(chatId, "درخواست تغییر را بعد از /edit بنویسید.", env);
   if (text.startsWith("/edit ")) return editCode(chatId, text.slice(6).trim(), env);
+  if (looksLikeEditRequest(text)) return editCode(chatId, text, env);
   return agentReply(chatId, text, env);
 }
 
@@ -272,6 +273,7 @@ async function searchHistory(chatId: number, query: string, env: Env): Promise<v
 }
 
 function needsRepo(question: string): boolean { return /پروژه|ریپو|کد|فایل|گیت.?هاب|repo|code|file|github|worker|agents|package|wrangler|typescript|javascript|ساختار/i.test(question); }
+function looksLikeEditRequest(question: string): boolean { return /(?:می.?خوام|میخام|می.?خواهم|تغییر بده|عوض کن|جایگزین کن|change|replace|update|modify|set)/i.test(question) && /(?:رو\s+به|به|to|with|به‌جای|instead)/i.test(question); }
 function needsWeb(question: string): boolean { return /اینترنت|وب|جست.?جو|آخرین|جدیدترین|امروز|قیمت|خبر|نسخه جدید|مستندات|internet|web|search|latest|today|news|price|documentation|۲۰۲|202[4-9]|https?:\/\//i.test(question); }
 
 async function projectContext(env: Env): Promise<string> {
@@ -397,8 +399,10 @@ function applyDeterministicEdit(path: string, content: string, instruction: stri
 }
 function applyTextReplacement(content: string, instruction: string): { content: string; summary: string } | undefined {
   const quoted = [...instruction.matchAll(/["“”'`](.{3,200}?)["“”'`]/g)].map(match => match[1].trim());
-  const oldText = quoted.find(value => normalizeSearchText(content).includes(normalizeSearchText(value)));
-  const replacement = instruction.match(/(?:رو\s+به|به|to)\s+["“”'`]?(.+?)["“”'`]?(?:\s+(?:تغییر|عوض|کن|بده)|$)/i)?.[1]?.trim();
+  const replacementMatch = instruction.match(/(.{3,240}?)\s+رو\s+به\s+(.+?)(?:\s+(?:تغییر|عوض|کن|بده)|[،,؛;]|$)/i);
+  const oldCandidates = replacementMatch ? [replacementMatch[1], ...quoted] : quoted;
+  const oldText = oldCandidates.map(value => value.replace(/^(?:می.?خوام|می.?خام|می.?خواهم)\s+/i, "").trim()).sort((a, b) => b.length - a.length).find(value => normalizeSearchText(content).includes(normalizeSearchText(value)));
+  const replacement = replacementMatch?.[2]?.trim() ?? instruction.match(/(?:رو\s+به|به|to)\s+["“”'`]?(.+?)["“”'`]?(?:\s+(?:تغییر|عوض|کن|بده)|$)/i)?.[1]?.trim();
   if (!oldText || !replacement) return undefined;
   const newText = replacement.replace(/["“”'`]+$/g, "").trim();
   if (!newText || !content.includes(oldText)) return undefined;
