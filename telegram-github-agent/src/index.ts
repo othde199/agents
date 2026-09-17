@@ -14,6 +14,7 @@ export interface Env {
 type TelegramUpdate = { message?: { chat: { id: number }; text?: string; from?: { id: number } }; callback_query?: { id: string; data?: string; message?: { chat: { id: number } } } };
 type GithubFile = { content: string; sha: string; encoding: string; size: number };
 type GithubRepo = { full_name: string; private: boolean; html_url: string; default_branch?: string; archived?: boolean };
+type GithubRepoDetails = { full_name: string; default_branch: string };
 type ConversationMessage = { role: "user" | "assistant"; content: string };
 type ProjectMemory = { history: ConversationMessage[]; summary: string; preferences: string[] };
 type MemoryStore = { activeProject: string; repo?: string; projects: Record<string, ProjectMemory> };
@@ -303,17 +304,20 @@ async function editCode(chatId: number, instruction: string, env: Env): Promise<
   const activeEnv = memory.repo ? { ...env, GITHUB_REPO: memory.repo } : env;
   const requestedPath = extractRequestedPath(instruction);
   if (!requestedPath) return sendTelegram(chatId, "مسیر فایل را دقیق بنویسید؛ مثال: package.json", env);
+  const details = await github(`/repos/${activeEnv.GITHUB_REPO}`, activeEnv) as GithubRepoDetails;
+  const branch = details.default_branch || activeEnv.GITHUB_DEFAULT_BRANCH;
+  const repoEnv = { ...activeEnv, GITHUB_DEFAULT_BRANCH: branch };
   const filePath = githubPath(requestedPath);
-  const current = await github(`/repos/${activeEnv.GITHUB_REPO}/contents/${filePath}?ref=${encodeURIComponent(activeEnv.GITHUB_DEFAULT_BRANCH)}`, activeEnv) as GithubFile;
+  const current = await github(`/repos/${repoEnv.GITHUB_REPO}/contents/${filePath}?ref=${encodeURIComponent(branch)}`, repoEnv) as GithubFile;
   const currentContent = decodeGithub(current.content);
   const deterministic = applyDeterministicEdit(requestedPath, currentContent, instruction);
-  const plan = deterministic ? JSON.stringify({ path: requestedPath, content: deterministic.content, summary: deterministic.summary }) : await ai(activeEnv, `فقط یک JSON معتبر و بدون markdown برگردان؛ هیچ توضیحی بیرون JSON ننویس. شکل دقیق: {"path":"${requestedPath}","content":"کل محتوای کامل جدید فایل","summary":"خلاصه کوتاه فارسی"}. مسیر فایل دقیقاً باید ${requestedPath} باشد و content هرگز نباید placeholder باشد.\nمحتوای فعلی فایل:\n${currentContent.slice(0, 50000)}\nدرخواست کاربر: ${instruction}`);
+  const plan = deterministic ? JSON.stringify({ path: requestedPath, content: deterministic.content, summary: deterministic.summary }) : await ai(repoEnv, `فقط یک JSON معتبر و بدون markdown برگردان؛ هیچ توضیحی بیرون JSON ننویس. شکل دقیق: {"path":"${requestedPath}","content":"کل محتوای کامل جدید فایل","summary":"خلاصه کوتاه فارسی"}. مسیر فایل دقیقاً باید ${requestedPath} باشد و content هرگز نباید placeholder باشد.\nمحتوای فعلی فایل:\n${currentContent.slice(0, 50000)}\nدرخواست کاربر: ${instruction}`);
   let parsed: { path?: string; content?: string; summary?: string };
   try { parsed = JSON.parse(extractJson(plan)); } catch { return sendTelegram(chatId, `مدل نتوانست تغییر فایل را به شکل معتبر تولید کند. محتوای فایل تغییر نکرد.\n${plan.slice(0, 1200)}`, env); }
   if (!parsed.path || typeof parsed.content !== "string") return sendTelegram(chatId, "درخواست مبهم است؛ نام دقیق فایل و تغییر موردنظر را بنویسید.", env);
   if (parsed.content.includes("کل محتوای جدید فایل") || parsed.path.includes("/" ) && parsed.path.startsWith(activeEnv.GITHUB_REPO)) return sendTelegram(chatId, "خروجی مدل معتبر نبود و برای جلوگیری از خراب‌شدن فایل، Commit انجام نشد.", env);
   if (!safePath(parsed.path) || parsed.content.length > Number(env.MAX_FILE_BYTES ?? 120000)) return sendTelegram(chatId, "این مسیر یا اندازه فایل مجاز نیست.", env);
-  const result = await github(`/repos/${activeEnv.GITHUB_REPO}/contents/${filePath}`, activeEnv, { method: "PUT", body: JSON.stringify({ message: `feat(bot): ${parsed.summary ?? "update requested from Telegram"}`.slice(0, 120), content: btoa(unescape(encodeURIComponent(parsed.content))), sha: current.sha, branch: activeEnv.GITHUB_DEFAULT_BRANCH }) }) as { commit?: { html_url?: string } };
+  const result = await github(`/repos/${repoEnv.GITHUB_REPO}/contents/${filePath}`, repoEnv, { method: "PUT", body: JSON.stringify({ message: `feat(bot): ${parsed.summary ?? "update requested from Telegram"}`.slice(0, 120), content: btoa(unescape(encodeURIComponent(parsed.content))), sha: current.sha, branch }) }) as { commit?: { html_url?: string } };
   return sendTelegram(chatId, `✅ تغییر در گیت‌هاب ثبت شد.\nفایل: ${parsed.path}\n${parsed.summary ?? ""}\nCommit: ${result.commit?.html_url ?? "ثبت شد"}`, env);
 }
 
@@ -325,7 +329,12 @@ async function ai(env: Env, prompt: string, history: ConversationMessage[] = [])
 
 async function github(path: string, env: Env, init: RequestInit = {}): Promise<unknown> {
   const response = await fetch(`https://api.github.com${path}`, { ...init, headers: { Accept: "application/vnd.github+json", Authorization: `Bearer ${env.GITHUB_TOKEN}`, "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "telegram-github-agent", "Content-Type": "application/json", ...(init.headers ?? {}) } });
-  if (!response.ok) throw new Error(`GitHub API ${response.status}`);
+  if (!response.ok) {
+    const body = await response.text();
+    let message = "";
+    try { message = (JSON.parse(body) as { message?: string }).message ?? ""; } catch { /* non-JSON error */ }
+    throw new Error(`GitHub API ${response.status}${message ? `: ${message}` : ""}`);
+  }
   return response.json();
 }
 
