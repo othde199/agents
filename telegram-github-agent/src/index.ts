@@ -181,7 +181,8 @@ async function agentReply(chatId: number, question: string, env: Env): Promise<v
   const prompt = `تو یک ایجنت عمومی و دستیار برنامه‌نویسی هستی. به فارسی و دقیق جواب بده؛ اگر سؤال انگلیسی بود می‌توانی انگلیسی جواب بدهی. اگر اطلاعات کافی نیست صادقانه بگو. از context زیر و حافظه استفاده کن.\n\n${freshnessRule}\nریپوی زمینه: ${repoEnv.GITHUB_REPO}\nپروژه فعال: ${memory.activeProject}\nخلاصه حافظه: ${memory.project.summary}\nترجیحات کاربر: ${memory.project.preferences.join(" | ")}\n${repoContext}\n${webContext}\nسؤال کاربر: ${question}`;
   const answer = await ai(repoEnv, prompt, memory.project.history);
   await appendMemory(state, { role: "user", content: question }, { role: "assistant", content: answer });
-  return sendTelegram(chatId, answer, env);
+  const sources = needsWeb(question) ? [...webContext.matchAll(/(?:URL|SOURCE):\s*(https?:\/\/[^\s]+)/g)].map(match => match[1]).slice(0, 5) : [];
+  return sendTelegram(chatId, sources.length ? `${answer}\n\nمنابع بررسی‌شده:\n${sources.join("\n")}` : answer, env);
 }
 
 async function readMemory(state: DurableObjectStub): Promise<{ activeProject: string; repo?: string; project: ProjectMemory }> {
@@ -309,24 +310,37 @@ async function webSearch(question: string): Promise<string> {
   try {
     const directUrls = [...question.matchAll(/https?:\/\/[^\s<>"'،،]+/gi)].map(match => match[0].replace(/[).،،]+$/g, ""));
     const officialUrls = /node\s*\.?(?:js|جی\s*اس)|نود\s*جی\s*اس/i.test(question) ? ["https://nodejs.org/dist/index.json"] : [];
-    const urls = directUrls.length ? directUrls : [...officialUrls, ...(await searchResultUrls(question))];
+    const searchResults = directUrls.length ? directUrls.map(url => ({ url, title: url, snippet: "" })) : await searchResultDetails(question);
+    const urls = directUrls.length ? directUrls : [...officialUrls, ...searchResults.map(item => item.url)];
     if (!urls.length) return "WEB SEARCH: no results found";
     const pages: string[] = [];
     for (const url of urls.slice(0, 4)) {
       const page = await fetchPageText(url);
       if (page) pages.push(`SOURCE: ${url}\n${page}`);
     }
-    return pages.length ? `WEB SEARCH AND PAGE CONTENT (use sources carefully):\n${pages.join("\n\n").slice(0, 24000)}` : `WEB SEARCH FAILED: live page content could not be fetched. Do not answer current-version questions from memory.`;
+    if (pages.length) return `WEB SEARCH AND PAGE CONTENT (use sources carefully):\n${pages.join("\n\n").slice(0, 24000)}\n\nSOURCES:\n${urls.join("\n")}`;
+    const snippets = searchResults.map(item => `TITLE: ${item.title}\nURL: ${item.url}\nSNIPPET: ${item.snippet}`).join("\n\n");
+    return snippets ? `WEB SEARCH RESULTS (page fetch unavailable; use only these snippets and cite URLs):\n${snippets.slice(0, 18000)}` : "WEB SEARCH FAILED: live search returned no readable results. Do not answer current-version questions from memory.";
   } catch { return "WEB SEARCH: unavailable; پاسخ را بر اساس دانش عمومی بده و بگو جست‌وجوی زنده در دسترس نبود."; }
 }
 
 async function searchResultUrls(question: string): Promise<string[]> {
+  return (await searchResultDetails(question)).map(item => item.url);
+}
+
+async function searchResultDetails(question: string): Promise<{ url: string; title: string; snippet: string }[]> {
   const response = await fetch(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(question)}`, { headers: { "user-agent": "telegram-github-agent/1.0" } });
   const html = await response.text();
-  return [...html.matchAll(/result__a[^>]*href="([^"]+)"[^>]*>(.*?)<\/a>/g)].slice(0, 6).map(match => {
+  const matches = [...html.matchAll(/result__a[^>]*href="([^"]+)"[^>]*>(.*?)<\/a>/g)].slice(0, 6);
+  return matches.map(match => {
     const raw = match[1].replace(/&amp;/g, "&");
-    try { return new URL(raw, "https://html.duckduckgo.com").searchParams.get("uddg") ?? raw; } catch { return raw; }
-  }).filter(url => /^https?:\/\//i.test(url));
+    let url = raw;
+    try { url = new URL(raw, "https://html.duckduckgo.com").searchParams.get("uddg") ?? raw; } catch { /* keep raw */ }
+    const start = match.index ?? 0;
+    const following = html.slice(start, start + 5000);
+    const snippetMatch = following.match(/result__snippet[^>]*>([\s\S]*?)<\//i);
+    return { url, title: stripHtml(match[2]), snippet: stripHtml(snippetMatch?.[1] ?? "") };
+  }).filter(item => /^https?:\/\//i.test(item.url));
 }
 
 async function fetchPageText(url: string): Promise<string> {
