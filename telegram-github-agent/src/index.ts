@@ -25,6 +25,12 @@ const MAIN_MENU = { inline_keyboard: [
   [{ text: "✏️ تغییر کد", callback_data: "menu:edit" }, { text: "❓ راهنما", callback_data: "menu:help" }],
   [{ text: "⏸ توقف", callback_data: "menu:stop" }, { text: "▶️ ادامه", callback_data: "menu:resume" }]
 ] };
+const QUICK_MENU = { keyboard: [
+  [{ text: "🤖 سؤال از ایجنت" }, { text: "🌐 جست‌وجوی وب" }],
+  [{ text: "📚 فهرست ریپوها" }, { text: "📊 وضعیت" }],
+  [{ text: "🧠 حافظه" }, { text: "✏️ تغییر کد" }],
+  [{ text: "⏸ توقف" }, { text: "▶️ ادامه" }]
+], resize_keyboard: true, is_persistent: true, input_field_placeholder: "پیام یا سؤال خود را بنویسید" };
 
 const HELP = `🤖 Agent Think — نسخه Free\n\nپیام را مستقیم بفرست؛ Agent خودش تصمیم می‌گیرد آیا بررسی پروژه یا جست‌وجوی وب لازم است.\n\nدستورات اصلی:\n/ask <سؤال> — پرسش از ایجنت\n/search <عبارت> — جست‌وجوی اجباری وب\n/repos — نمایش همه ریپوهای قابل‌دسترسی GitHub\n/repo owner/name — ذخیره ریپو برای زمینه پاسخ\n/repo — نمایش ریپوی ذخیره‌شده\n/status — وضعیت Worker\n\nمدیریت حافظه:\n/project <نام> — انتخاب حافظه جدا برای پروژه\n/remember <نکته> — ذخیره ترجیح در حافظه بلندمدت\n/history <عبارت> — جست‌وجو در تاریخچه مکالمه\n/clear-memory — پاک‌کردن حافظه پروژه فعال\n/clear — پاک‌کردن ریپوی ذخیره‌شده؛ ریپوزیتوری GitHub حذف نمی‌شود\n\nکنترل ربات:\n/stop — توقف پاسخ‌گویی\n/resume — ادامه فعالیت\n/help — نمایش این راهنما\n\nبرای تغییر کد، از /edit <درخواست> استفاده کنید.`;
 
@@ -109,7 +115,18 @@ async function setupWebhook(url: URL, env: Env): Promise<Response> {
 }
 
 async function handleMessage(chatId: number, text: string, env: Env): Promise<void> {
-  if (text === "/start" || text === "/help") return sendTelegram(chatId, HELP, env, MAIN_MENU);
+  if (text === "/start" || text === "/help") {
+    await sendTelegram(chatId, HELP, env, MAIN_MENU);
+    return sendTelegram(chatId, "منوی سریع کنار کادر پیام:", env, QUICK_MENU);
+  }
+  if (text === "🤖 سؤال از ایجنت") return handleMenuCallback(chatId, "ask", env);
+  if (text === "🌐 جست‌وجوی وب") return handleMenuCallback(chatId, "search", env);
+  if (text === "📚 فهرست ریپوها") return handleMenuCallback(chatId, "repos", env);
+  if (text === "📊 وضعیت") return handleMenuCallback(chatId, "status", env);
+  if (text === "🧠 حافظه") return handleMenuCallback(chatId, "memory", env);
+  if (text === "✏️ تغییر کد") return handleMenuCallback(chatId, "edit", env);
+  if (text === "⏸ توقف") return handleMenuCallback(chatId, "stop", env);
+  if (text === "▶️ ادامه") return handleMenuCallback(chatId, "resume", env);
   if (text === "/status") return showStatus(chatId, env);
   if (text === "/repo") return showRepo(chatId, env);
   if (text.startsWith("/repo ")) return saveRepo(chatId, text.slice(6).trim(), env);
