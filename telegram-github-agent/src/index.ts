@@ -176,13 +176,28 @@ async function agentReply(chatId: number, question: string, env: Env): Promise<v
   const activeEnv = memory.repo ? { ...env, GITHUB_REPO: memory.repo } : env;
   const repoEnv = await resolveRepoEnv(activeEnv);
   const repoContext = needsRepo(question) ? await projectContext(repoEnv) : "";
-  const webContext = needsWeb(question) ? await webSearch(question) : "";
-  const freshnessRule = needsWeb(question) ? "این سؤال به اطلاعات زنده نیاز دارد. فقط از WEB SEARCH AND PAGE CONTENT یا WEB SEARCH RESULTS استفاده کن. فقط وقتی نسخه یا عدد دقیق اعلام کن که همان مقدار صریحاً در متن منبع آمده باشد؛ از حافظه مدل حدس نزن. اگر منبع کافی نیست، دقیقاً بگو «نتوانستم اطلاعات به‌روز و قابل‌اعتماد را تأیید کنم» و هرگز کاربر را دوباره به جست‌وجو یا سایت دیگری ارجاع نده." : "";
+  const webDecision = await decideWebSearch(env, question, memory.project.history);
+  const webContext = webDecision.search ? await webSearch(webDecision.query || question) : "";
+  const freshnessRule = webDecision.search ? "این پاسخ بر اساس جست‌وجوی زنده تهیه می‌شود. فقط وقتی نسخه یا عدد دقیق اعلام کن که همان مقدار صریحاً در متن منبع آمده باشد؛ از حافظه مدل حدس نزن. اگر منبع کافی نیست، دقیقاً بگو «نتوانستم اطلاعات به‌روز و قابل‌اعتماد را تأیید کنم»." : "برای این سؤال جست‌وجوی وب لازم تشخیص داده نشد.";
   const prompt = `تو یک ایجنت عمومی و دستیار برنامه‌نویسی هستی. به فارسی و دقیق جواب بده؛ اگر سؤال انگلیسی بود می‌توانی انگلیسی جواب بدهی. اگر اطلاعات کافی نیست صادقانه بگو. از context زیر و حافظه استفاده کن.\n\n${freshnessRule}\nریپوی زمینه: ${repoEnv.GITHUB_REPO}\nپروژه فعال: ${memory.activeProject}\nخلاصه حافظه: ${memory.project.summary}\nترجیحات کاربر: ${memory.project.preferences.join(" | ")}\n${repoContext}\n${webContext}\nسؤال کاربر: ${question}`;
   const answer = await ai(repoEnv, prompt, memory.project.history);
   await appendMemory(state, { role: "user", content: question }, { role: "assistant", content: answer });
-  const sources = needsWeb(question) ? [...webContext.matchAll(/(?:URL|SOURCE):\s*(https?:\/\/[^\s]+)/g)].map(match => match[1]).slice(0, 5) : [];
+  const sources = webDecision.search ? [...webContext.matchAll(/(?:URL|SOURCE):\s*(https?:\/\/[^\s]+)/g)].map(match => match[1]).slice(0, 5) : [];
   return sendTelegram(chatId, sources.length ? `${answer}\n\nمنابع بررسی‌شده:\n${sources.join("\n")}` : answer, env);
+}
+
+async function decideWebSearch(env: Env, question: string, history: ConversationMessage[] = []): Promise<{ search: boolean; query?: string }> {
+  try {
+    const result = await env.AI.run(env.AI_MODEL ?? "@cf/meta/llama-3.3-70b-instruct-fp8-fast", { messages: [
+      { role: "system", content: "تو router یک ایجنت عمومی هستی. تشخیص بده آیا پاسخ دقیق به سؤال به اطلاعات زنده اینترنت یا خواندن یک صفحه نیاز دارد. برای احوالپرسی، توضیح مفاهیم پایدار و سؤال‌های عمومی که دانش مدل کافی است false بده. برای آخرین/امروز/قیمت/خبر/نسخه فعلی، URL، یا درخواست بررسی سایت true بده. فقط JSON معتبر در یک خط برگردان: {\"search\":true|false,\"query\":\"عبارت جست‌وجو\"}." },
+      ...history.slice(-2),
+      { role: "user", content: question }
+    ], max_tokens: 180, temperature: 0 }) as { response?: unknown };
+    const raw = typeof result.response === "string" ? result.response : JSON.stringify(result.response ?? "");
+    const parsed = JSON.parse(extractJson(raw)) as { search?: boolean; query?: string };
+    if (typeof parsed.search === "boolean") return { search: parsed.search, query: parsed.query?.trim() || question };
+  } catch { /* fallback only if router fails */ }
+  return { search: needsWeb(question), query: question };
 }
 
 async function readMemory(state: DurableObjectStub): Promise<{ activeProject: string; repo?: string; project: ProjectMemory }> {
