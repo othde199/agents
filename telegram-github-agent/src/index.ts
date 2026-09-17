@@ -186,10 +186,19 @@ async function agentReply(chatId: number, question: string, env: Env): Promise<v
 
 async function aiWithSearchTool(env: Env, prompt: string, history: ConversationMessage[] = []): Promise<{ answer: string; context: string }> {
   const messages = [{ role: "system" as const, content: "تو یک ایجنت دقیق هستی. برای اطلاعات به‌روز از ابزار استفاده کن و هرگز موفقیت یا منبعی را جعل نکن." }, ...history.slice(-6), { role: "user" as const, content: prompt }];
-  const result = await env.AI.run(env.AI_MODEL ?? "@cf/meta/llama-3.3-70b-instruct-fp8-fast", { messages, max_tokens: 1800, temperature: 0.2, tools: [{ name: "search_web", description: "Search the public web and read pages relevant to the user's question. Use this for current or unknown information.", parameters: { type: "object", properties: { query: { type: "string", description: "The exact web search query" } }, required: ["query"] } }] }) as { response?: unknown; tool_calls?: { name?: string; arguments?: unknown }[] };
-  const tool = result.tool_calls?.find(call => call.name === "search_web");
-  if (!tool) return { answer: typeof result.response === "string" ? result.response : JSON.stringify(result.response ?? "پاسخی دریافت نشد."), context: "" };
-  const args = typeof tool.arguments === "string" ? JSON.parse(tool.arguments) as { query?: string } : tool.arguments as { query?: string };
+  const result = await env.AI.run(env.AI_MODEL ?? "@cf/meta/llama-3.3-70b-instruct-fp8-fast", { messages, max_tokens: 1800, temperature: 0.2, tools: [{ name: "search_web", description: "Search the public web and read pages relevant to the user's question. Use this for current or unknown information.", parameters: { type: "object", properties: { query: { type: "string", description: "The exact web search query" } }, required: ["query"] } }] }) as { response?: unknown; tool_calls?: unknown; result?: { tool_calls?: unknown; response?: unknown } };
+  const calls = result.tool_calls ?? result.result?.tool_calls;
+  const toolList = Array.isArray(calls) ? calls as { name?: string; arguments?: unknown; function?: { name?: string; arguments?: unknown } }[] : [];
+  const tool = toolList.find(call => call.name === "search_web" || call.function?.name === "search_web");
+  if (!tool) {
+    const modelAnswer = typeof result.response === "string" ? result.response : JSON.stringify(result.response ?? result.result?.response ?? "پاسخی دریافت نشد.");
+    if (!needsWeb(prompt) || !/قابل.?تأیید|اطلاعات کافی|نمی.?دانم|cannot|don't know|unknown/i.test(modelAnswer)) return { answer: modelAnswer, context: "" };
+    const fallbackContext = await webSearch(prompt);
+    const fallbackAnswer = await ai(env, `${prompt}\n\nابزار search_web به‌صورت خودکار فراخوانی نشد. این نتیجه جست‌وجوی اجباری است:\n${fallbackContext}\n\nفقط بر اساس شواهد پاسخ بده و منابع را ذکر کن.`, history);
+    return { answer: fallbackAnswer, context: fallbackContext };
+  }
+  const rawArguments = tool.arguments ?? tool.function?.arguments;
+  const args = typeof rawArguments === "string" ? JSON.parse(rawArguments) as { query?: string } : rawArguments as { query?: string };
   const context = await webSearch(args?.query?.trim() || prompt);
   const final = await ai(env, `${prompt}\n\nنتیجه ابزار search_web:\n${context}\n\nاکنون پاسخ نهایی را فقط بر اساس این نتیجه و context بده. اگر شواهد کافی نیست بگو قابل تأیید نیست.`, history);
   return { answer: final, context };
@@ -355,8 +364,12 @@ async function searchResultDetails(question: string): Promise<{ url: string; tit
   const queries = [question, translateSearchQuery(question)].filter((value, index, all) => value && all.indexOf(value) === index);
   const allResults: { url: string; title: string; snippet: string }[] = [];
   for (const query of queries.slice(0, 2)) {
-    const response = await fetch(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`, { headers: { "user-agent": "telegram-github-agent/1.0" } });
-    const html = await response.text();
+    let html = "";
+    for (const endpoint of ["https://html.duckduckgo.com/html/", "https://lite.duckduckgo.com/lite/"]) {
+      const response = await fetch(`${endpoint}?q=${encodeURIComponent(query)}`, { headers: { "user-agent": "telegram-github-agent/1.0", accept: "text/html" } });
+      html = await response.text();
+      if (html.includes("result__a") || html.includes("result-link")) break;
+    }
     const matches = [...html.matchAll(/result__a[^>]*href="([^"]+)"[^>]*>(.*?)<\/a>/g)].slice(0, 6);
     allResults.push(...matches.map(match => {
     const raw = match[1].replace(/&amp;/g, "&");
