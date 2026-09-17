@@ -174,10 +174,11 @@ async function agentReply(chatId: number, question: string, env: Env): Promise<v
   const state = env.BOT_STATE.get(env.BOT_STATE.idFromName(String(chatId)));
   const memory = await readMemory(state);
   const activeEnv = memory.repo ? { ...env, GITHUB_REPO: memory.repo } : env;
-  const repoContext = needsRepo(question) ? await projectContext(activeEnv) : "";
+  const repoEnv = await resolveRepoEnv(activeEnv);
+  const repoContext = needsRepo(question) ? await projectContext(repoEnv) : "";
   const webContext = needsWeb(question) ? await webSearch(question) : "";
-  const prompt = `تو یک ایجنت عمومی و دستیار برنامه‌نویسی هستی. به فارسی و دقیق جواب بده؛ اگر سؤال انگلیسی بود می‌توانی انگلیسی جواب بدهی. اگر اطلاعات کافی نیست صادقانه بگو. از context زیر و حافظه استفاده کن.\n\nریپوی زمینه: ${activeEnv.GITHUB_REPO}\nپروژه فعال: ${memory.activeProject}\nخلاصه حافظه: ${memory.project.summary}\nترجیحات کاربر: ${memory.project.preferences.join(" | ")}\n${repoContext}\n${webContext}\nسؤال کاربر: ${question}`;
-  const answer = await ai(env, prompt, memory.project.history);
+  const prompt = `تو یک ایجنت عمومی و دستیار برنامه‌نویسی هستی. به فارسی و دقیق جواب بده؛ اگر سؤال انگلیسی بود می‌توانی انگلیسی جواب بدهی. اگر اطلاعات کافی نیست صادقانه بگو. از context زیر و حافظه استفاده کن.\n\nریپوی زمینه: ${repoEnv.GITHUB_REPO}\nپروژه فعال: ${memory.activeProject}\nخلاصه حافظه: ${memory.project.summary}\nترجیحات کاربر: ${memory.project.preferences.join(" | ")}\n${repoContext}\n${webContext}\nسؤال کاربر: ${question}`;
+  const answer = await ai(repoEnv, prompt, memory.project.history);
   await appendMemory(state, { role: "user", content: question }, { role: "assistant", content: answer });
   return sendTelegram(chatId, answer, env);
 }
@@ -272,13 +273,26 @@ async function searchHistory(chatId: number, query: string, env: Env): Promise<v
   return sendTelegram(chatId, results.length ? `🔎 نتایج حافظه:\n${results.map(item => `${item.role === "user" ? "شما" : "ربات"}: ${item.content}`).join("\n\n").slice(0, 3800)}` : "نتیجه‌ای در حافظه پیدا نشد.", env);
 }
 
+async function resolveRepoEnv(env: Env): Promise<Env> {
+  try {
+    const details = await github(`/repos/${env.GITHUB_REPO}`, env) as GithubRepoDetails;
+    return { ...env, GITHUB_DEFAULT_BRANCH: details.default_branch || env.GITHUB_DEFAULT_BRANCH };
+  } catch { return env; }
+}
+
 function needsRepo(question: string): boolean { return /پروژه|ریپو|کد|فایل|گیت.?هاب|repo|code|file|github|worker|agents|package|wrangler|typescript|javascript|ساختار/i.test(question); }
 function looksLikeEditRequest(question: string): boolean { return /(?:می.?خوام|میخام|می.?خواهم|تغییر بده|عوض کن|جایگزین کن|change|replace|update|modify|set)/i.test(question) && /(?:رو\s+به|به|to|with|به‌جای|instead)/i.test(question); }
 function needsWeb(question: string): boolean { return /اینترنت|وب|جست.?جو|آخرین|جدیدترین|امروز|قیمت|خبر|نسخه جدید|مستندات|internet|web|search|latest|today|news|price|documentation|۲۰۲|202[4-9]|https?:\/\//i.test(question); }
 
 async function projectContext(env: Env): Promise<string> {
-  const tree = await github(`/repos/${env.GITHUB_REPO}/git/trees/${encodeURIComponent(env.GITHUB_DEFAULT_BRANCH)}?recursive=1`, env) as { tree?: { path: string; type: string }[] };
-  const files = (tree.tree ?? []).filter(x => x.type === "blob").map(x => x.path);
+  let files: string[] = [];
+  try {
+    const tree = await github(`/repos/${env.GITHUB_REPO}/git/trees/${encodeURIComponent(env.GITHUB_DEFAULT_BRANCH)}?recursive=1`, env) as { tree?: { path: string; type: string }[] };
+    files = (tree.tree ?? []).filter(x => x.type === "blob").map(x => x.path);
+  } catch {
+    const root = await github(`/repos/${env.GITHUB_REPO}/contents?ref=${encodeURIComponent(env.GITHUB_DEFAULT_BRANCH)}`, env) as { path: string; type: string }[];
+    files = root.filter(x => x.type === "file").map(x => x.path);
+  }
   const selected = files.filter(path => /(^|\/)(README|package\.json|wrangler\.jsonc?|tsconfig\.json|src\/index\.ts|src\/agent\.ts|\.md$)/i.test(path)).slice(0, 6);
   const snippets: string[] = [];
   for (const path of selected) {
