@@ -322,8 +322,8 @@ async function editCode(chatId: number, instruction: string, env: Env): Promise<
 }
 
 async function ai(env: Env, prompt: string, history: ConversationMessage[] = []): Promise<string> {
-  const messages = [{ role: "system" as const, content: "تو یک دستیار مفید هستی. هرگز secret تولید یا افشا نکن." }, ...history, { role: "user" as const, content: prompt }];
-  const result = await env.AI.run(env.AI_MODEL ?? "@cf/meta/llama-3.2-1b-instruct", { messages, max_tokens: 1200 }) as { response?: string };
+  const messages = [{ role: "system" as const, content: "تو یک ایجنت حرفه‌ای برنامه‌نویسی هستی. قبل از پاسخ context را دقیق بررسی کن، حدس نزن، مسیر فایل‌ها و تغییرات را دقیق نگه دار، و هرگز secret یا توکن تولید یا افشا نکن. اگر اطلاعات کافی نیست، سؤال روشن‌کننده بپرس." }, ...history.slice(-8), { role: "user" as const, content: prompt }];
+  const result = await env.AI.run(env.AI_MODEL ?? "@cf/meta/llama-3.3-70b-instruct-fp8-fast", { messages, max_tokens: 2000, temperature: 0.2 }) as { response?: string };
   return result.response ?? "پاسخی دریافت نشد.";
 }
 

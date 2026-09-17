@@ -12,7 +12,7 @@
   "vars": {
     "GITHUB_REPO": "othde199/agents",
     "GITHUB_DEFAULT_BRANCH": "main",
-    "AI_MODEL": "@cf/meta/llama-3.2-1b-instruct",
+    "AI_MODEL": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
     "MAX_FILE_BYTES": "120000"
   }
 }
