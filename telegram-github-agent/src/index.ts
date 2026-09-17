@@ -176,14 +176,23 @@ async function agentReply(chatId: number, question: string, env: Env): Promise<v
   const activeEnv = memory.repo ? { ...env, GITHUB_REPO: memory.repo } : env;
   const repoEnv = await resolveRepoEnv(activeEnv);
   const repoContext = needsRepo(question) ? await projectContext(repoEnv) : "";
-  const webDecision = await decideWebSearch(env, question, memory.project.history);
-  const webContext = webDecision.search ? await webSearch(webDecision.query || question) : "";
-  const freshnessRule = webDecision.search ? "این پاسخ بر اساس جست‌وجوی زنده تهیه می‌شود. فقط وقتی نسخه یا عدد دقیق اعلام کن که همان مقدار صریحاً در متن منبع آمده باشد؛ از حافظه مدل حدس نزن. اگر منبع کافی نیست، دقیقاً بگو «نتوانستم اطلاعات به‌روز و قابل‌اعتماد را تأیید کنم»." : "برای این سؤال جست‌وجوی وب لازم تشخیص داده نشد.";
-  const prompt = `تو یک ایجنت عمومی و دستیار برنامه‌نویسی هستی. به فارسی و دقیق جواب بده؛ اگر سؤال انگلیسی بود می‌توانی انگلیسی جواب بدهی. اگر اطلاعات کافی نیست صادقانه بگو. از context زیر و حافظه استفاده کن.\n\n${freshnessRule}\nریپوی زمینه: ${repoEnv.GITHUB_REPO}\nپروژه فعال: ${memory.activeProject}\nخلاصه حافظه: ${memory.project.summary}\nترجیحات کاربر: ${memory.project.preferences.join(" | ")}\n${repoContext}\n${webContext}\nسؤال کاربر: ${question}`;
-  const answer = await ai(repoEnv, prompt, memory.project.history);
+  const prompt = `تو یک ایجنت عمومی و دستیار برنامه‌نویسی هستی. به فارسی و دقیق جواب بده. اگر سؤال به اطلاعات زنده، آخرین نسخه، خبر، قیمت، سایت یا URL نیاز دارد از ابزار search_web استفاده کن؛ از حافظه‌ات حدس نزن. اگر ابزار نتیجه کافی نداد، صادقانه بگو اطلاعات قابل‌تأیید نیست.\n\nریپوی زمینه: ${repoEnv.GITHUB_REPO}\nپروژه فعال: ${memory.activeProject}\nخلاصه حافظه: ${memory.project.summary}\nترجیحات کاربر: ${memory.project.preferences.join(" | ")}\n${repoContext}\nسؤال کاربر: ${question}`;
+  const toolResult = await aiWithSearchTool(repoEnv, prompt, memory.project.history);
+  const answer = toolResult.answer;
   await appendMemory(state, { role: "user", content: question }, { role: "assistant", content: answer });
-  const sources = webDecision.search ? [...webContext.matchAll(/(?:URL|SOURCE):\s*(https?:\/\/[^\s]+)/g)].map(match => match[1]).slice(0, 5) : [];
+  const sources = [...toolResult.context.matchAll(/(?:URL|SOURCE):\s*(https?:\/\/[^\s]+)/g)].map(match => match[1]).slice(0, 5);
   return sendTelegram(chatId, sources.length ? `${answer}\n\nمنابع بررسی‌شده:\n${sources.join("\n")}` : answer, env);
+}
+
+async function aiWithSearchTool(env: Env, prompt: string, history: ConversationMessage[] = []): Promise<{ answer: string; context: string }> {
+  const messages = [{ role: "system" as const, content: "تو یک ایجنت دقیق هستی. برای اطلاعات به‌روز از ابزار استفاده کن و هرگز موفقیت یا منبعی را جعل نکن." }, ...history.slice(-6), { role: "user" as const, content: prompt }];
+  const result = await env.AI.run(env.AI_MODEL ?? "@cf/meta/llama-3.3-70b-instruct-fp8-fast", { messages, max_tokens: 1800, temperature: 0.2, tools: [{ name: "search_web", description: "Search the public web and read pages relevant to the user's question. Use this for current or unknown information.", parameters: { type: "object", properties: { query: { type: "string", description: "The exact web search query" } }, required: ["query"] } }] }) as { response?: unknown; tool_calls?: { name?: string; arguments?: unknown }[] };
+  const tool = result.tool_calls?.find(call => call.name === "search_web");
+  if (!tool) return { answer: typeof result.response === "string" ? result.response : JSON.stringify(result.response ?? "پاسخی دریافت نشد."), context: "" };
+  const args = typeof tool.arguments === "string" ? JSON.parse(tool.arguments) as { query?: string } : tool.arguments as { query?: string };
+  const context = await webSearch(args?.query?.trim() || prompt);
+  const final = await ai(env, `${prompt}\n\nنتیجه ابزار search_web:\n${context}\n\nاکنون پاسخ نهایی را فقط بر اساس این نتیجه و context بده. اگر شواهد کافی نیست بگو قابل تأیید نیست.`, history);
+  return { answer: final, context };
 }
 
 async function decideWebSearch(env: Env, question: string, history: ConversationMessage[] = []): Promise<{ search: boolean; query?: string }> {
