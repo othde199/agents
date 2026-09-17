@@ -318,7 +318,7 @@ async function editCode(chatId: number, instruction: string, env: Env): Promise<
   const textEdit = applyTextReplacement(currentContent, instruction);
   const plan = deterministic ? JSON.stringify({ path: requestedPath, content: deterministic.content, summary: deterministic.summary }) : textEdit ? JSON.stringify({ path: requestedPath, content: textEdit.content, summary: textEdit.summary }) : await ai(repoEnv, `فقط یک JSON معتبر و بدون markdown برگردان؛ هیچ توضیحی بیرون JSON ننویس. شکل دقیق: {"path":"${requestedPath}","content":"کل محتوای کامل جدید فایل","summary":"خلاصه کوتاه فارسی"}. مسیر فایل دقیقاً باید ${requestedPath} باشد و content هرگز نباید placeholder باشد.\nمحتوای فعلی فایل:\n${currentContent.slice(0, 50000)}\nدرخواست کاربر: ${instruction}`);
   let parsed: { path?: string; content?: string; summary?: string };
-  try { parsed = JSON.parse(extractJson(plan)); } catch { return sendTelegram(chatId, `مدل نتوانست تغییر فایل را به شکل معتبر تولید کند. محتوای فایل تغییر نکرد.\n${plan.slice(0, 1200)}`, env); }
+  try { parsed = JSON.parse(extractJson(String(plan))); } catch { return sendTelegram(chatId, `مدل نتوانست تغییر فایل را به شکل معتبر تولید کند. محتوای فایل تغییر نکرد.\n${String(plan).slice(0, 1200)}`, env); }
   if (!parsed.path || typeof parsed.content !== "string") return sendTelegram(chatId, "درخواست مبهم است؛ نام دقیق فایل و تغییر موردنظر را بنویسید.", env);
   if (parsed.content.includes("کل محتوای جدید فایل") || parsed.path.includes("/" ) && parsed.path.startsWith(activeEnv.GITHUB_REPO)) return sendTelegram(chatId, "خروجی مدل معتبر نبود و برای جلوگیری از خراب‌شدن فایل، Commit انجام نشد.", env);
   if (!safePath(parsed.path) || parsed.content.length > Number(env.MAX_FILE_BYTES ?? 120000)) return sendTelegram(chatId, "این مسیر یا اندازه فایل مجاز نیست.", env);
@@ -351,8 +351,9 @@ function normalizeSearchText(value: string): string { return value.toLowerCase()
 
 async function ai(env: Env, prompt: string, history: ConversationMessage[] = []): Promise<string> {
   const messages = [{ role: "system" as const, content: "تو یک ایجنت حرفه‌ای برنامه‌نویسی هستی. قبل از پاسخ context را دقیق بررسی کن، حدس نزن، مسیر فایل‌ها و تغییرات را دقیق نگه دار، و هرگز secret یا توکن تولید یا افشا نکن. اگر اطلاعات کافی نیست، سؤال روشن‌کننده بپرس." }, ...history.slice(-8), { role: "user" as const, content: prompt }];
-  const result = await env.AI.run(env.AI_MODEL ?? "@cf/meta/llama-3.3-70b-instruct-fp8-fast", { messages, max_tokens: 2000, temperature: 0.2 }) as { response?: string };
-  return result.response ?? "پاسخی دریافت نشد.";
+  const result = await env.AI.run(env.AI_MODEL ?? "@cf/meta/llama-3.3-70b-instruct-fp8-fast", { messages, max_tokens: 2000, temperature: 0.2 }) as { response?: unknown; result?: { response?: unknown }; output_text?: unknown };
+  const response = result.response ?? result.result?.response ?? result.output_text;
+  return typeof response === "string" ? response : response == null ? "پاسخی دریافت نشد." : JSON.stringify(response);
 }
 
 async function github(path: string, env: Env, init: RequestInit = {}): Promise<unknown> {
@@ -407,7 +408,7 @@ function applyTextReplacement(content: string, instruction: string): { content: 
   if (!oldText || !replacement) return undefined;
   const newText = replacement.replace(/["“”'`]+$/g, "").trim();
   if (!newText) return undefined;
-  const variants = [oldText, oldText.replace(/["“”`]/g, "'"), oldText.replace(/[’']/g, '"')];
+  const variants = [oldText, oldText.replace(/["“”`]/g, "'"), oldText.replace(/[’']/g, '"'), oldText.replace(/"/g, "'")];
   const actual = variants.find(value => content.includes(value));
   if (!actual) return undefined;
   return { content: content.split(actual).join(newText), summary: `عبارت «${actual}» به «${newText}» تغییر کرد` };
