@@ -417,7 +417,8 @@ async function editCode(chatId: number, instruction: string, env: Env): Promise<
   const repoEnv = { ...activeEnv, GITHUB_DEFAULT_BRANCH: branch };
   const explicitPath = extractRequestedPath(instruction);
   const located = explicitPath ? undefined : await locateFileForInstruction(repoEnv, branch, instruction);
-  const requestedPath = explicitPath ?? located?.path;
+  const selectedPath = explicitPath ?? located?.path ?? await chooseFileForInstruction(repoEnv, branch, instruction);
+  const requestedPath = selectedPath;
   if (!requestedPath) return sendTelegram(chatId, "نتوانستم فایل و عبارت موردنظر را در ریپوی انتخاب‌شده پیدا کنم.", env);
   const filePath = githubPath(requestedPath);
   const current = located?.path === requestedPath ? located.file : await github(`/repos/${repoEnv.GITHUB_REPO}/contents/${filePath}?ref=${encodeURIComponent(branch)}`, repoEnv) as GithubFile;
@@ -435,7 +436,8 @@ async function editCode(chatId: number, instruction: string, env: Env): Promise<
 }
 
 async function locateFileForInstruction(env: Env, branch: string, instruction: string): Promise<{ path: string; file: GithubFile; content: string } | undefined> {
-  const tree = await github(`/repos/${env.GITHUB_REPO}/git/trees/${encodeURIComponent(branch)}?recursive=1`, env) as { tree?: { path: string; type: string; size?: number }[] };
+  let tree: { tree?: { path: string; type: string; size?: number }[] };
+  try { tree = await github(`/repos/${env.GITHUB_REPO}/git/trees/${encodeURIComponent(branch)}?recursive=1`, env) as { tree?: { path: string; type: string; size?: number }[] }; } catch { return undefined; }
   const candidates = (tree.tree ?? []).filter(item => item.type === "blob" && (item.size ?? 0) < 100000 && /\.(tsx?|jsx?|vue|svelte|html|css|scss|md|json)$/i.test(item.path) && !/(node_modules|dist|build|coverage|\.lock$)/i.test(item.path)).sort((a, b) => (/(src|app|components)/i.test(b.path) ? 1 : 0) - (/(src|app|components)/i.test(a.path) ? 1 : 0)).slice(0, 24);
   const needles = extractSearchNeedles(instruction);
   for (const candidate of candidates) {
@@ -447,6 +449,18 @@ async function locateFileForInstruction(env: Env, branch: string, instruction: s
     } catch { /* skip inaccessible or binary files */ }
   }
   return undefined;
+}
+
+async function chooseFileForInstruction(env: Env, branch: string, instruction: string): Promise<string | undefined> {
+  let tree: { tree?: { path: string; type: string; size?: number }[] };
+  try { tree = await github(`/repos/${env.GITHUB_REPO}/git/trees/${encodeURIComponent(branch)}?recursive=1`, env) as { tree?: { path: string; type: string; size?: number }[] }; } catch { return undefined; }
+  const files = (tree.tree ?? []).filter(item => item.type === "blob" && (item.size ?? 0) < 120000 && /\.(tsx?|jsx?|vue|svelte|html|css|scss|md|json)$/i.test(item.path) && !/(node_modules|dist|build|coverage|\.lock$)/i.test(item.path)).map(item => item.path).slice(0, 120);
+  if (!files.length) return undefined;
+  const answer = await ai(env, `از فهرست فایل‌های واقعی زیر، مناسب‌ترین فایل برای اجرای درخواست کاربر را انتخاب کن. فقط JSON معتبر برگردان: {"path":"مسیر دقیق فایل یا null"}. اگر درخواست به چند فایل مربوط است، بهترین فایل شروع را انتخاب کن. حدس خارج از فهرست نزن.\nفهرست:\n${files.join("\n")}\nدرخواست: ${instruction}`);
+  try {
+    const parsed = JSON.parse(extractJson(answer)) as { path?: string | null };
+    return parsed.path && files.includes(parsed.path) ? parsed.path : undefined;
+  } catch { return undefined; }
 }
 
 function extractSearchNeedles(instruction: string): string[] {
