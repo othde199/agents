@@ -309,9 +309,8 @@ async function projectContext(env: Env): Promise<string> {
 async function webSearch(question: string): Promise<string> {
   try {
     const directUrls = [...question.matchAll(/https?:\/\/[^\s<>"'،،]+/gi)].map(match => match[0].replace(/[).،،]+$/g, ""));
-    const officialUrls = /node\s*\.?(?:js|جی\s*اس)|نود\s*جی\s*اس/i.test(question) ? ["https://nodejs.org/dist/index.json"] : /پابجی|pubg/i.test(question) && /موبایل|mobile|اندروید|android|ios|آیفون/i.test(question) ? ["https://play.google.com/store/apps/details?id=com.tencent.ig&hl=en&gl=US", "https://pubgmobile.com/", "https://www.pubgmobile.com/"] : /پابجی|pubg/i.test(question) ? ["https://pubg.com/news", "https://store.steampowered.com/app/578080/PUBG_BATTLEGROUNDS/"] : [];
     const searchResults = directUrls.length ? directUrls.map(url => ({ url, title: url, snippet: "" })) : await searchResultDetails(question);
-    const urls = directUrls.length ? directUrls : [...officialUrls, ...searchResults.map(item => item.url)];
+    const urls = directUrls.length ? directUrls : searchResults.map(item => item.url);
     if (!urls.length) return "WEB SEARCH: no results found";
     const pages: string[] = [];
     for (const url of urls.slice(0, 4)) {
@@ -349,7 +348,7 @@ async function searchResultDetails(question: string): Promise<{ url: string; tit
 }
 
 function translateSearchQuery(question: string): string {
-  return question.replace(/اخرین|آخرین/gi, "latest").replace(/ورژن|نسخه/gi, "version").replace(/بازی/gi, "game").replace(/پابجی/gi, "PUBG").replace(/موبایل/gi, "Mobile").replace(/ویندوز|کامپیوتر|پی.?سی/gi, "PC Windows").replace(/چیه|چیست|چی هست/gi, "what is");
+  return question.replace(/اخرین|آخرین/gi, "latest").replace(/ورژن|نسخه/gi, "version").replace(/بازی/gi, "game").replace(/موبایل/gi, "mobile").replace(/ویندوز|کامپیوتر|پی.?سی/gi, "PC Windows").replace(/چیه|چیست|چی هست/gi, "what is");
 }
 
 async function fetchPageText(url: string): Promise<string> {
