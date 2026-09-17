@@ -53,9 +53,10 @@ export default {
     if (!chatId || (!text && !callback) || !isAllowedChat(chatId, env.ALLOWED_CHAT_IDS)) return json({ ok: true });
     if (callback) {
       await answerCallback(callback.id, env);
-      if (callback.data?.startsWith("repo:")) {
-        const repo = callback.data.slice(5);
-        await saveRepo(chatId, repo, env);
+      if (callback.data?.startsWith("repoidx:")) {
+        const index = Number(callback.data.slice(8));
+        const option = await (await stateForChat(env, chatId).fetch(`https://bot-state/repo-option/${index}`)).json() as { repo?: string };
+        if (option.repo) await saveRepo(chatId, option.repo, env);
       }
       return json({ ok: true });
     }
@@ -160,10 +161,12 @@ async function listRepositories(chatId: number, env: Env): Promise<void> {
     if (batch.length < 100) break;
   }
   if (!repositories.length) return sendTelegram(chatId, "هیچ ریپویی با این GitHub Token پیدا نشد.", env);
+  await stateForChat(env, chatId).fetch("https://bot-state/repo-options", { method: "POST", body: JSON.stringify({ repos: repositories.map(repo => repo.full_name) }) });
   const chunks: GithubRepo[][] = [];
   for (let index = 0; index < repositories.length; index += 30) chunks.push(repositories.slice(index, index + 30));
   for (let index = 0; index < chunks.length; index++) {
-    const keyboard = chunks[index].map(repo => [{ text: `${repo.private ? "🔒" : "🌐"} ${repo.full_name}`, callback_data: `repo:${repo.full_name}` }]);
+    const offset = index * 30;
+    const keyboard = chunks[index].map((repo, itemIndex) => [{ text: `${repo.private ? "🔒" : "🌐"} ${repo.full_name}`, callback_data: `repoidx:${offset + itemIndex}` }]);
     await sendTelegram(chatId, `📚 ریپوهای قابل‌دسترسی (${index + 1}/${chunks.length})\n\nبرای انتخاب، روی نام ریپو کلیک کنید:`, env, { inline_keyboard: keyboard });
   }
 }
@@ -174,6 +177,8 @@ async function saveRepo(chatId: number, repo: string, env: Env): Promise<void> {
   await state.fetch("https://bot-state/repo", { method: "POST", body: JSON.stringify({ repo }) });
   return sendTelegram(chatId, `✅ ریپو برای زمینه پاسخ ذخیره شد:\nhttps://github.com/${repo}`, env);
 }
+
+function stateForChat(env: Env, chatId: number): DurableObjectStub { return env.BOT_STATE.get(env.BOT_STATE.idFromName(String(chatId))); }
 
 async function clearSavedRepo(chatId: number, env: Env): Promise<void> {
   const state = env.BOT_STATE.get(env.BOT_STATE.idFromName(String(chatId)));
@@ -300,6 +305,15 @@ export class BotState {
       await this.state.storage.put("memory", store);
     }
     if (path === "/repo" && request.method === "GET") return json({ repo: store.repo });
+    if (path === "/repo-options" && request.method === "POST") {
+      const body = await request.json() as { repos?: string[] };
+      await this.state.storage.put("repo-options", body.repos ?? []);
+    }
+    if (path.startsWith("/repo-option/") && request.method === "GET") {
+      const index = Number(path.slice("/repo-option/".length));
+      const repos = (await this.state.storage.get<string[]>("repo-options")) ?? [];
+      return json({ repo: Number.isInteger(index) && index >= 0 ? repos[index] : undefined });
+    }
     if (path === "/project" && request.method === "POST") {
       const body = await request.json() as { name?: string };
       if (body.name?.trim()) {
