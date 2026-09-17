@@ -177,7 +177,8 @@ async function agentReply(chatId: number, question: string, env: Env): Promise<v
   const repoEnv = await resolveRepoEnv(activeEnv);
   const repoContext = needsRepo(question) ? await projectContext(repoEnv) : "";
   const webContext = needsWeb(question) ? await webSearch(question) : "";
-  const prompt = `تو یک ایجنت عمومی و دستیار برنامه‌نویسی هستی. به فارسی و دقیق جواب بده؛ اگر سؤال انگلیسی بود می‌توانی انگلیسی جواب بدهی. اگر اطلاعات کافی نیست صادقانه بگو. از context زیر و حافظه استفاده کن.\n\nریپوی زمینه: ${repoEnv.GITHUB_REPO}\nپروژه فعال: ${memory.activeProject}\nخلاصه حافظه: ${memory.project.summary}\nترجیحات کاربر: ${memory.project.preferences.join(" | ")}\n${repoContext}\n${webContext}\nسؤال کاربر: ${question}`;
+  const freshnessRule = needsWeb(question) ? "این سؤال به اطلاعات زنده نیاز دارد. فقط از WEB SEARCH AND PAGE CONTENT یا WEB SEARCH RESULTS استفاده کن؛ اگر منبع زنده وجود ندارد، صریح بگو نتوانستم اطلاعات به‌روز را تأیید کنم و هرگز از حافظه مدل عدد یا نسخه حدس نزن." : "";
+  const prompt = `تو یک ایجنت عمومی و دستیار برنامه‌نویسی هستی. به فارسی و دقیق جواب بده؛ اگر سؤال انگلیسی بود می‌توانی انگلیسی جواب بدهی. اگر اطلاعات کافی نیست صادقانه بگو. از context زیر و حافظه استفاده کن.\n\n${freshnessRule}\nریپوی زمینه: ${repoEnv.GITHUB_REPO}\nپروژه فعال: ${memory.activeProject}\nخلاصه حافظه: ${memory.project.summary}\nترجیحات کاربر: ${memory.project.preferences.join(" | ")}\n${repoContext}\n${webContext}\nسؤال کاربر: ${question}`;
   const answer = await ai(repoEnv, prompt, memory.project.history);
   await appendMemory(state, { role: "user", content: question }, { role: "assistant", content: answer });
   return sendTelegram(chatId, answer, env);
@@ -282,7 +283,7 @@ async function resolveRepoEnv(env: Env): Promise<Env> {
 
 function needsRepo(question: string): boolean { return /پروژه|ریپو|کد|فایل|گیت.?هاب|repo|code|file|github|worker|agents|package|wrangler|typescript|javascript|ساختار/i.test(question); }
 function looksLikeEditRequest(question: string): boolean { return /(?:می.?خوام|میخام|می.?خواهم|تغییر بده|عوض کن|جایگزین کن|change|replace|update|modify|set)/i.test(question) && /(?:رو\s+به|به|to|with|به‌جای|instead)/i.test(question); }
-function needsWeb(question: string): boolean { return /اینترنت|وب|سایت|صفحه|لینک|برو داخل|محتوای سایت|جست.?جو|آخرین|جدیدترین|امروز|قیمت|خبر|نسخه جدید|مستندات|internet|web|site|page|url|link|search|latest|today|news|price|documentation|۲۰۲|202[4-9]|https?:\/\//i.test(question); }
+function needsWeb(question: string): boolean { return /اینترنت|وب|سایت|صفحه|لینک|برو داخل|محتوای سایت|جست.?جو|آخرین|اخرین|جدیدترین|امروز|قیمت|خبر|ورژن|نسخه جدید|مستندات|internet|web|site|page|url|link|search|latest|today|news|price|documentation|۲۰۲|202[4-9]|https?:\/\//i.test(question); }
 
 async function projectContext(env: Env): Promise<string> {
   let files: string[] = [];
@@ -307,14 +308,15 @@ async function projectContext(env: Env): Promise<string> {
 async function webSearch(question: string): Promise<string> {
   try {
     const directUrls = [...question.matchAll(/https?:\/\/[^\s<>"'،،]+/gi)].map(match => match[0].replace(/[).،،]+$/g, ""));
-    const urls = directUrls.length ? directUrls : await searchResultUrls(question);
+    const officialUrls = /node\s*\.?(?:js|جی\s*اس)|نود\s*جی\s*اس/i.test(question) ? ["https://nodejs.org/dist/index.json"] : [];
+    const urls = directUrls.length ? directUrls : [...officialUrls, ...(await searchResultUrls(question))];
     if (!urls.length) return "WEB SEARCH: no results found";
     const pages: string[] = [];
     for (const url of urls.slice(0, 4)) {
       const page = await fetchPageText(url);
       if (page) pages.push(`SOURCE: ${url}\n${page}`);
     }
-    return pages.length ? `WEB SEARCH AND PAGE CONTENT (use sources carefully):\n${pages.join("\n\n").slice(0, 24000)}` : `WEB SEARCH RESULTS:\n${urls.join("\n")}`;
+    return pages.length ? `WEB SEARCH AND PAGE CONTENT (use sources carefully):\n${pages.join("\n\n").slice(0, 24000)}` : `WEB SEARCH FAILED: live page content could not be fetched. Do not answer current-version questions from memory.`;
   } catch { return "WEB SEARCH: unavailable; پاسخ را بر اساس دانش عمومی بده و بگو جست‌وجوی زنده در دسترس نبود."; }
 }
 
