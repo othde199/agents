@@ -96,7 +96,7 @@ async function setupWebhook(url: URL, env: Env): Promise<Response> {
 
 async function handleMessage(chatId: number, text: string, env: Env): Promise<void> {
   if (text === "/start" || text === "/help") return sendTelegram(chatId, HELP, env);
-  if (text === "/status") return sendTelegram(chatId, `✅ فعال\nریپو: ${env.GITHUB_REPO}\nشاخه: ${env.GITHUB_DEFAULT_BRANCH}\nمدل: ${env.AI_MODEL ?? "پیش‌فرض"}`, env);
+  if (text === "/status") return showStatus(chatId, env);
   if (text === "/repo") return showRepo(chatId, env);
   if (text.startsWith("/repo ")) return saveRepo(chatId, text.slice(6).trim(), env);
   if (text === "/repos") return listRepositories(chatId, env);
@@ -150,6 +150,11 @@ async function showRepo(chatId: number, env: Env): Promise<void> {
   const state = env.BOT_STATE.get(env.BOT_STATE.idFromName(String(chatId)));
   const data = await (await state.fetch("https://bot-state/repo")).json() as { repo?: string };
   return sendTelegram(chatId, `ریپوزیتوری متصل: ${data.repo ?? env.GITHUB_REPO}\n\nبرای ذخیره ریپو: /repo owner/name\nبرای پاک‌کردن ریپوی ذخیره‌شده: /clear`, env);
+}
+
+async function showStatus(chatId: number, env: Env): Promise<void> {
+  const memory = await readMemory(stateForChat(env, chatId));
+  return sendTelegram(chatId, `✅ فعال\nریپو: ${memory.repo ?? env.GITHUB_REPO}\nپروژه حافظه: ${memory.activeProject}\nشاخه: ${env.GITHUB_DEFAULT_BRANCH}\nمدل: ${env.AI_MODEL ?? "پیش‌فرض"}`, env);
 }
 
 async function listRepositories(chatId: number, env: Env): Promise<void> {
@@ -245,14 +250,16 @@ async function webSearch(question: string): Promise<string> {
 async function editCode(chatId: number, instruction: string, env: Env): Promise<void> {
   if (!instruction) return sendTelegram(chatId, "درخواست تغییر را بعد از /edit بنویسید.", env);
   await sendTelegram(chatId, "⏳ در حال تحلیل درخواست و آماده‌سازی تغییر...", env);
-  const plan = await ai(env, `تو برنامه‌نویس ارشد هستی. فقط JSON معتبر برگردان با این شکل: {"path":"مسیر نسبی فایل","content":"کل محتوای جدید فایل","summary":"خلاصه فارسی"}. اگر درخواست مبهم است path را خالی بگذار. ریپو: ${env.GITHUB_REPO}. درخواست: ${instruction}`);
+  const memory = await readMemory(stateForChat(env, chatId));
+  const activeEnv = memory.repo ? { ...env, GITHUB_REPO: memory.repo } : env;
+  const plan = await ai(activeEnv, `تو برنامه‌نویس ارشد هستی. فقط JSON معتبر برگردان با این شکل: {"path":"مسیر نسبی فایل","content":"کل محتوای جدید فایل","summary":"خلاصه فارسی"}. اگر درخواست مبهم است path را خالی بگذار. ریپو: ${activeEnv.GITHUB_REPO}. درخواست: ${instruction}`);
   let parsed: { path?: string; content?: string; summary?: string };
   try { parsed = JSON.parse(stripFences(plan)); } catch { return sendTelegram(chatId, `نتوانستم خروجی ساختاریافته بسازم.\n${plan.slice(0, 2500)}`, env); }
   if (!parsed.path || typeof parsed.content !== "string") return sendTelegram(chatId, "درخواست مبهم است؛ نام دقیق فایل و تغییر موردنظر را بنویسید.", env);
   if (!safePath(parsed.path) || parsed.content.length > Number(env.MAX_FILE_BYTES ?? 120000)) return sendTelegram(chatId, "این مسیر یا اندازه فایل مجاز نیست.", env);
   const filePath = githubPath(parsed.path);
-  const current = await github(`/repos/${env.GITHUB_REPO}/contents/${filePath}?ref=${encodeURIComponent(env.GITHUB_DEFAULT_BRANCH)}`, env) as GithubFile;
-  const result = await github(`/repos/${env.GITHUB_REPO}/contents/${filePath}`, env, { method: "PUT", body: JSON.stringify({ message: `feat(bot): ${parsed.summary ?? "update requested from Telegram"}`.slice(0, 120), content: btoa(unescape(encodeURIComponent(parsed.content))), sha: current.sha, branch: env.GITHUB_DEFAULT_BRANCH }) }) as { commit?: { html_url?: string } };
+  const current = await github(`/repos/${activeEnv.GITHUB_REPO}/contents/${filePath}?ref=${encodeURIComponent(activeEnv.GITHUB_DEFAULT_BRANCH)}`, activeEnv) as GithubFile;
+  const result = await github(`/repos/${activeEnv.GITHUB_REPO}/contents/${filePath}`, activeEnv, { method: "PUT", body: JSON.stringify({ message: `feat(bot): ${parsed.summary ?? "update requested from Telegram"}`.slice(0, 120), content: btoa(unescape(encodeURIComponent(parsed.content))), sha: current.sha, branch: activeEnv.GITHUB_DEFAULT_BRANCH }) }) as { commit?: { html_url?: string } };
   return sendTelegram(chatId, `✅ تغییر در گیت‌هاب ثبت شد.\nفایل: ${parsed.path}\n${parsed.summary ?? ""}\nCommit: ${result.commit?.html_url ?? "ثبت شد"}`, env);
 }
 
