@@ -302,24 +302,49 @@ async function editCode(chatId: number, instruction: string, env: Env): Promise<
   await sendTelegram(chatId, "⏳ در حال تحلیل درخواست و آماده‌سازی تغییر...", env);
   const memory = await readMemory(stateForChat(env, chatId));
   const activeEnv = memory.repo ? { ...env, GITHUB_REPO: memory.repo } : env;
-  const requestedPath = extractRequestedPath(instruction);
-  if (!requestedPath) return sendTelegram(chatId, "مسیر فایل را دقیق بنویسید؛ مثال: package.json", env);
   const details = await github(`/repos/${activeEnv.GITHUB_REPO}`, activeEnv) as GithubRepoDetails;
   const branch = details.default_branch || activeEnv.GITHUB_DEFAULT_BRANCH;
   const repoEnv = { ...activeEnv, GITHUB_DEFAULT_BRANCH: branch };
+  const explicitPath = extractRequestedPath(instruction);
+  const located = explicitPath ? undefined : await locateFileForInstruction(repoEnv, branch, instruction);
+  const requestedPath = explicitPath ?? located?.path;
+  if (!requestedPath) return sendTelegram(chatId, "نتوانستم فایل و عبارت موردنظر را در ریپوی انتخاب‌شده پیدا کنم.", env);
   const filePath = githubPath(requestedPath);
-  const current = await github(`/repos/${repoEnv.GITHUB_REPO}/contents/${filePath}?ref=${encodeURIComponent(branch)}`, repoEnv) as GithubFile;
-  const currentContent = decodeGithub(current.content);
+  const current = located?.path === requestedPath ? located.file : await github(`/repos/${repoEnv.GITHUB_REPO}/contents/${filePath}?ref=${encodeURIComponent(branch)}`, repoEnv) as GithubFile;
+  const currentContent = located?.path === requestedPath ? located.content : decodeGithub(current.content);
   const deterministic = applyDeterministicEdit(requestedPath, currentContent, instruction);
-  const plan = deterministic ? JSON.stringify({ path: requestedPath, content: deterministic.content, summary: deterministic.summary }) : await ai(repoEnv, `فقط یک JSON معتبر و بدون markdown برگردان؛ هیچ توضیحی بیرون JSON ننویس. شکل دقیق: {"path":"${requestedPath}","content":"کل محتوای کامل جدید فایل","summary":"خلاصه کوتاه فارسی"}. مسیر فایل دقیقاً باید ${requestedPath} باشد و content هرگز نباید placeholder باشد.\nمحتوای فعلی فایل:\n${currentContent.slice(0, 50000)}\nدرخواست کاربر: ${instruction}`);
+  const textEdit = applyTextReplacement(currentContent, instruction);
+  const plan = deterministic ? JSON.stringify({ path: requestedPath, content: deterministic.content, summary: deterministic.summary }) : textEdit ? JSON.stringify({ path: requestedPath, content: textEdit.content, summary: textEdit.summary }) : await ai(repoEnv, `فقط یک JSON معتبر و بدون markdown برگردان؛ هیچ توضیحی بیرون JSON ننویس. شکل دقیق: {"path":"${requestedPath}","content":"کل محتوای کامل جدید فایل","summary":"خلاصه کوتاه فارسی"}. مسیر فایل دقیقاً باید ${requestedPath} باشد و content هرگز نباید placeholder باشد.\nمحتوای فعلی فایل:\n${currentContent.slice(0, 50000)}\nدرخواست کاربر: ${instruction}`);
   let parsed: { path?: string; content?: string; summary?: string };
   try { parsed = JSON.parse(extractJson(plan)); } catch { return sendTelegram(chatId, `مدل نتوانست تغییر فایل را به شکل معتبر تولید کند. محتوای فایل تغییر نکرد.\n${plan.slice(0, 1200)}`, env); }
   if (!parsed.path || typeof parsed.content !== "string") return sendTelegram(chatId, "درخواست مبهم است؛ نام دقیق فایل و تغییر موردنظر را بنویسید.", env);
   if (parsed.content.includes("کل محتوای جدید فایل") || parsed.path.includes("/" ) && parsed.path.startsWith(activeEnv.GITHUB_REPO)) return sendTelegram(chatId, "خروجی مدل معتبر نبود و برای جلوگیری از خراب‌شدن فایل، Commit انجام نشد.", env);
   if (!safePath(parsed.path) || parsed.content.length > Number(env.MAX_FILE_BYTES ?? 120000)) return sendTelegram(chatId, "این مسیر یا اندازه فایل مجاز نیست.", env);
   const result = await github(`/repos/${repoEnv.GITHUB_REPO}/contents/${filePath}`, repoEnv, { method: "PUT", body: JSON.stringify({ message: `feat(bot): ${parsed.summary ?? "update requested from Telegram"}`.slice(0, 120), content: btoa(unescape(encodeURIComponent(parsed.content))), sha: current.sha, branch }) }) as { commit?: { html_url?: string } };
-  return sendTelegram(chatId, `✅ تغییر در گیت‌هاب ثبت شد.\nفایل: ${parsed.path}\n${parsed.summary ?? ""}\nCommit: ${result.commit?.html_url ?? "ثبت شد"}`, env);
+  return sendTelegram(chatId, `✅ تغییر در گیت‌هاب ثبت شد.\nفایل پیدا‌شده: ${parsed.path}\n${parsed.summary ?? ""}\nCommit: ${result.commit?.html_url ?? "ثبت شد"}`, env);
 }
+
+async function locateFileForInstruction(env: Env, branch: string, instruction: string): Promise<{ path: string; file: GithubFile; content: string } | undefined> {
+  const tree = await github(`/repos/${env.GITHUB_REPO}/git/trees/${encodeURIComponent(branch)}?recursive=1`, env) as { tree?: { path: string; type: string; size?: number }[] };
+  const candidates = (tree.tree ?? []).filter(item => item.type === "blob" && (item.size ?? 0) < 100000 && /\.(tsx?|jsx?|vue|svelte|html|css|scss|md|json)$/i.test(item.path) && !/(node_modules|dist|build|coverage|\.lock$)/i.test(item.path)).sort((a, b) => (/(src|app|components)/i.test(b.path) ? 1 : 0) - (/(src|app|components)/i.test(a.path) ? 1 : 0)).slice(0, 24);
+  const needles = extractSearchNeedles(instruction);
+  for (const candidate of candidates) {
+    try {
+      const file = await github(`/repos/${env.GITHUB_REPO}/contents/${githubPath(candidate.path)}?ref=${encodeURIComponent(branch)}`, env) as GithubFile;
+      const content = decodeGithub(file.content);
+      const normalized = normalizeSearchText(content);
+      if (needles.some(needle => normalized.includes(normalizeSearchText(needle)))) return { path: candidate.path, file, content };
+    } catch { /* skip inaccessible or binary files */ }
+  }
+  return undefined;
+}
+
+function extractSearchNeedles(instruction: string): string[] {
+  const quoted = [...instruction.matchAll(/["“”'`](.{3,120}?)["“”'`]/g)].map(match => match[1].trim()).filter(value => !/^package\.json$/i.test(value));
+  const english = instruction.match(/[A-Za-z][A-Za-z0-9 ,.!?'_-]{4,100}/g) ?? [];
+  return [...new Set([...quoted, ...english].map(value => value.trim()).filter(value => value.length >= 4))];
+}
+function normalizeSearchText(value: string): string { return value.toLowerCase().replace(/[“”]/g, '"').replace(/[’]/g, "'").replace(/\s+/g, " ").trim(); }
 
 async function ai(env: Env, prompt: string, history: ConversationMessage[] = []): Promise<string> {
   const messages = [{ role: "system" as const, content: "تو یک ایجنت حرفه‌ای برنامه‌نویسی هستی. قبل از پاسخ context را دقیق بررسی کن، حدس نزن، مسیر فایل‌ها و تغییرات را دقیق نگه دار، و هرگز secret یا توکن تولید یا افشا نکن. اگر اطلاعات کافی نیست، سؤال روشن‌کننده بپرس." }, ...history.slice(-8), { role: "user" as const, content: prompt }];
@@ -369,6 +394,15 @@ function applyDeterministicEdit(path: string, content: string, instruction: stri
   const versionPattern = new RegExp(`(["']${escapeRegExp(packageName)}["']\\s*:\\s*["'])[^"']+(["'])`, "i");
   if (!versionPattern.test(content)) return undefined;
   return { content: content.replace(versionPattern, `$1^${newVersion}$2`), summary: `نسخه ${packageName} از ${oldVersion} یا نسخه فعلی به ${newVersion} تغییر کرد` };
+}
+function applyTextReplacement(content: string, instruction: string): { content: string; summary: string } | undefined {
+  const quoted = [...instruction.matchAll(/["“”'`](.{3,200}?)["“”'`]/g)].map(match => match[1].trim());
+  const oldText = quoted.find(value => normalizeSearchText(content).includes(normalizeSearchText(value)));
+  const replacement = instruction.match(/(?:رو\s+به|به|to)\s+["“”'`]?(.+?)["“”'`]?(?:\s+(?:تغییر|عوض|کن|بده)|$)/i)?.[1]?.trim();
+  if (!oldText || !replacement) return undefined;
+  const newText = replacement.replace(/["“”'`]+$/g, "").trim();
+  if (!newText || !content.includes(oldText)) return undefined;
+  return { content: content.split(oldText).join(newText), summary: `عبارت «${oldText}» به «${newText}» تغییر کرد` };
 }
 function escapeRegExp(value: string): string { return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
 function stripHtml(value: string): string { return value.replace(/<[^>]+>/g, "").replace(/&amp;/g, "&").replace(/&#x27;/g, "'").trim(); }
