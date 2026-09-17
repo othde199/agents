@@ -98,7 +98,8 @@ export default {
     }
     try { await handleMessage(chatId, text, env); } catch (error) {
       console.error("telegram handler failed", error);
-      await sendTelegram(chatId, "❌ اجرای درخواست شکست خورد. لاگ Worker را بررسی کنید.", env);
+      const detail = error instanceof Error ? error.message : "خطای نامشخص";
+      await sendTelegram(chatId, `❌ اجرای درخواست شکست خورد.\nجزئیات: ${detail.slice(0, 300)}`, env);
     }
     return json({ ok: true });
   }
@@ -356,9 +357,9 @@ function applyDeterministicEdit(path: string, content: string, instruction: stri
   const packageName = dependency[1];
   const oldVersion = dependency[2];
   const newVersion = dependency[3];
-  const versionPattern = new RegExp(`(["']${escapeRegExp(packageName)}["']\\s*:\\s*["'])\\^?${escapeRegExp(oldVersion)}(["'])`);
+  const versionPattern = new RegExp(`(["']${escapeRegExp(packageName)}["']\\s*:\\s*["'])[^"']+(["'])`);
   if (!versionPattern.test(content)) return undefined;
-  return { content: content.replace(versionPattern, `$1^${newVersion}$2`), summary: `نسخه ${packageName} از ${oldVersion} به ${newVersion} تغییر کرد` };
+  return { content: content.replace(versionPattern, `$1^${newVersion}$2`), summary: `نسخه ${packageName} از ${oldVersion} یا نسخه فعلی به ${newVersion} تغییر کرد` };
 }
 function escapeRegExp(value: string): string { return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
 function stripHtml(value: string): string { return value.replace(/<[^>]+>/g, "").replace(/&amp;/g, "&").replace(/&#x27;/g, "'").trim(); }
