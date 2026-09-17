@@ -77,7 +77,8 @@ async function setupWebhook(url: URL, env: Env): Promise<Response> {
   const response = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/setWebhook`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ url: webhookUrl, secret_token: env.TELEGRAM_WEBHOOK_SECRET }) });
   const webhookResult = await response.json();
   const commandsResponse = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/setMyCommands`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ commands: TELEGRAM_COMMANDS }) });
-  return json({ webhookUrl, telegram: webhookResult, commands: await commandsResponse.json() });
+  const menuResponse = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/setChatMenuButton`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ menu_button: { type: "commands" } }) });
+  return json({ webhookUrl, telegram: webhookResult, commands: await commandsResponse.json(), menu: await menuResponse.json() });
 }
 
 async function handleMessage(chatId: number, text: string, env: Env): Promise<void> {
