@@ -344,9 +344,10 @@ async function locateFileForInstruction(env: Env, branch: string, instruction: s
 function extractSearchNeedles(instruction: string): string[] {
   const quoted = [...instruction.matchAll(/["“”'`](.{3,120}?)["“”'`]/g)].map(match => match[1].trim()).filter(value => !/^package\.json$/i.test(value));
   const english = instruction.match(/[A-Za-z][A-Za-z0-9 ,.!?'_-]{4,100}/g) ?? [];
-  return [...new Set([...quoted, ...english].map(value => value.trim()).filter(value => value.length >= 4))];
+  const beforeTo = instruction.match(/([A-Za-z][^،,\n]{3,200}?)\s+رو\s+به/i)?.[1] ?? "";
+  return [...new Set([...quoted, ...english, beforeTo].map(value => value.replace(/^(?:میخام|می.?خوام|می.?خواهم)\s+/i, "").trim()).filter(value => value.length >= 4))];
 }
-function normalizeSearchText(value: string): string { return value.toLowerCase().replace(/[“”]/g, '"').replace(/[’]/g, "'").replace(/\s+/g, " ").trim(); }
+function normalizeSearchText(value: string): string { return value.toLowerCase().replace(/[“”’`"]+/g, "'").replace(/\s+/g, " ").trim(); }
 
 async function ai(env: Env, prompt: string, history: ConversationMessage[] = []): Promise<string> {
   const messages = [{ role: "system" as const, content: "تو یک ایجنت حرفه‌ای برنامه‌نویسی هستی. قبل از پاسخ context را دقیق بررسی کن، حدس نزن، مسیر فایل‌ها و تغییرات را دقیق نگه دار، و هرگز secret یا توکن تولید یا افشا نکن. اگر اطلاعات کافی نیست، سؤال روشن‌کننده بپرس." }, ...history.slice(-8), { role: "user" as const, content: prompt }];
@@ -401,12 +402,15 @@ function applyTextReplacement(content: string, instruction: string): { content: 
   const quoted = [...instruction.matchAll(/["“”'`](.{3,200}?)["“”'`]/g)].map(match => match[1].trim());
   const replacementMatch = instruction.match(/(.{3,240}?)\s+رو\s+به\s+(.+?)(?:\s+(?:تغییر|عوض|کن|بده)|[،,؛;]|$)/i);
   const oldCandidates = replacementMatch ? [replacementMatch[1], ...quoted] : quoted;
-  const oldText = oldCandidates.map(value => value.replace(/^(?:می.?خوام|می.?خام|می.?خواهم)\s+/i, "").trim()).sort((a, b) => b.length - a.length).find(value => normalizeSearchText(content).includes(normalizeSearchText(value)));
+  const oldText = oldCandidates.map(value => value.replace(/^(?:میخام|می.?خوام|می.?خواهم)\s+/i, "").trim()).sort((a, b) => b.length - a.length).find(value => normalizeSearchText(content).includes(normalizeSearchText(value)));
   const replacement = replacementMatch?.[2]?.trim() ?? instruction.match(/(?:رو\s+به|به|to)\s+["“”'`]?(.+?)["“”'`]?(?:\s+(?:تغییر|عوض|کن|بده)|$)/i)?.[1]?.trim();
   if (!oldText || !replacement) return undefined;
   const newText = replacement.replace(/["“”'`]+$/g, "").trim();
-  if (!newText || !content.includes(oldText)) return undefined;
-  return { content: content.split(oldText).join(newText), summary: `عبارت «${oldText}» به «${newText}» تغییر کرد` };
+  if (!newText) return undefined;
+  const variants = [oldText, oldText.replace(/["“”`]/g, "'"), oldText.replace(/[’']/g, '"')];
+  const actual = variants.find(value => content.includes(value));
+  if (!actual) return undefined;
+  return { content: content.split(actual).join(newText), summary: `عبارت «${actual}» به «${newText}» تغییر کرد` };
 }
 function escapeRegExp(value: string): string { return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
 function stripHtml(value: string): string { return value.replace(/<[^>]+>/g, "").replace(/&amp;/g, "&").replace(/&#x27;/g, "'").trim(); }
