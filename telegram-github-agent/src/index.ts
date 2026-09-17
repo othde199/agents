@@ -13,8 +13,9 @@ export interface Env {
 
 type TelegramUpdate = { message?: { chat: { id: number }; text?: string; from?: { id: number } } };
 type GithubFile = { content: string; sha: string; encoding: string; size: number };
+type ConversationMessage = { role: "user" | "assistant"; content: string };
 
-const HELP = `من یک ایجنت هوش مصنوعی هستم و می‌توانم درباره پروژه، برنامه‌نویسی و موضوعات عمومی پاسخ بدهم. برای اطلاعات جدید، وب را هم جست‌وجو می‌کنم.\n\nدستورات مدیریتی:\n/status — وضعیت اتصال\n/repo — ریپوزیتوری فعال\n/ask <سؤال> — سؤال از ایجنت\n/edit <درخواست> — تحلیل و ثبت تغییر کد\n/stop — توقف پاسخ‌گویی\n/resume — ادامه فعالیت\n\nمی‌توانید سؤال را بدون /ask هم بفرستید.`;
+const HELP = `من یک ایجنت هوش مصنوعی هستم و می‌توانم درباره پروژه، برنامه‌نویسی و موضوعات عمومی پاسخ بدهم. برای اطلاعات جدید، وب را هم جست‌وجو می‌کنم و تاریخچه کوتاه مکالمه را به خاطر می‌سپارم.\n\nدستورات مدیریتی:\n/status — وضعیت اتصال\n/repo — ریپوزیتوری فعال\n/ask <سؤال> — سؤال از ایجنت\n/edit <درخواست> — تحلیل و ثبت تغییر کد\n/clear — پاک‌کردن حافظه مکالمه\n/stop — توقف پاسخ‌گویی\n/resume — ادامه فعالیت\n\nمی‌توانید سؤال را بدون /ask هم بفرستید.`;
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -62,6 +63,7 @@ async function handleMessage(chatId: number, text: string, env: Env): Promise<vo
   if (text === "/start" || text === "/help") return sendTelegram(chatId, HELP, env);
   if (text === "/status") return sendTelegram(chatId, `✅ فعال\nریپو: ${env.GITHUB_REPO}\nشاخه: ${env.GITHUB_DEFAULT_BRANCH}\nمدل: ${env.AI_MODEL ?? "پیش‌فرض"}`, env);
   if (text === "/repo") return sendTelegram(chatId, `ریپوزیتوری فعال: https://github.com/${env.GITHUB_REPO}\nشاخه: ${env.GITHUB_DEFAULT_BRANCH}`, env);
+  if (text === "/clear") return clearConversation(chatId, env);
   if (text === "/ask") return sendTelegram(chatId, "سؤال را بعد از /ask بنویسید.\nمثال: /ask ساختار این پروژه چیست؟", env);
   if (text.startsWith("/ask ")) return agentReply(chatId, text.slice(5).trim(), env);
   if (text === "/edit") return sendTelegram(chatId, "درخواست تغییر را بعد از /edit بنویسید.", env);
@@ -74,8 +76,28 @@ async function agentReply(chatId: number, question: string, env: Env): Promise<v
   await sendTelegram(chatId, "⏳ در حال فکر کردن...", env);
   const repoContext = needsRepo(question) ? await projectContext(env) : "";
   const webContext = needsWeb(question) ? await webSearch(question) : "";
-  const answer = await ai(env, `تو یک ایجنت عمومی و دستیار برنامه‌نویسی هستی. به فارسی و دقیق جواب بده؛ اگر سؤال انگلیسی بود می‌توانی انگلیسی جواب بدهی. اگر اطلاعات کافی نیست صادقانه بگو. از context زیر استفاده کن و ادعای بدون منبع نکن.\n\n${repoContext}\n${webContext}\nسؤال کاربر: ${question}`);
+  const state = env.BOT_STATE.get(env.BOT_STATE.idFromName(String(chatId)));
+  const history = await readHistory(state);
+  const prompt = `تو یک ایجنت عمومی و دستیار برنامه‌نویسی هستی. به فارسی و دقیق جواب بده؛ اگر سؤال انگلیسی بود می‌توانی انگلیسی جواب بدهی. اگر اطلاعات کافی نیست صادقانه بگو. از context زیر استفاده کن و ادعای بدون منبع نکن.\n\n${repoContext}\n${webContext}\nسؤال کاربر: ${question}`;
+  const answer = await ai(env, prompt, history);
+  await appendHistory(state, { role: "user", content: question }, { role: "assistant", content: answer });
   return sendTelegram(chatId, answer, env);
+}
+
+async function readHistory(state: DurableObjectStub): Promise<ConversationMessage[]> {
+  const response = await state.fetch("https://bot-state/history");
+  const data = (await response.json()) as { history?: ConversationMessage[] };
+  return Array.isArray(data.history) ? data.history : [];
+}
+
+async function appendHistory(state: DurableObjectStub, user: ConversationMessage, assistant: ConversationMessage): Promise<void> {
+  await state.fetch("https://bot-state/history", { method: "POST", body: JSON.stringify({ user, assistant }) });
+}
+
+async function clearConversation(chatId: number, env: Env): Promise<void> {
+  const state = env.BOT_STATE.get(env.BOT_STATE.idFromName(String(chatId)));
+  await state.fetch("https://bot-state/clear", { method: "POST" });
+  return sendTelegram(chatId, "🧹 حافظه مکالمه پاک شد.", env);
 }
 
 function needsRepo(question: string): boolean { return /پروژه|ریپو|کد|فایل|گیت.?هاب|repo|code|file|github|worker|agents|package|wrangler|typescript|javascript|ساختار/i.test(question); }
@@ -118,8 +140,9 @@ async function editCode(chatId: number, instruction: string, env: Env): Promise<
   return sendTelegram(chatId, `✅ تغییر در گیت‌هاب ثبت شد.\nفایل: ${parsed.path}\n${parsed.summary ?? ""}\nCommit: ${result.commit?.html_url ?? "ثبت شد"}`, env);
 }
 
-async function ai(env: Env, prompt: string): Promise<string> {
-  const result = await env.AI.run(env.AI_MODEL ?? "@cf/meta/llama-3.2-1b-instruct", { messages: [{ role: "system", content: "تو یک دستیار مفید هستی. هرگز secret تولید یا افشا نکن." }, { role: "user", content: prompt }], max_tokens: 1200 }) as { response?: string };
+async function ai(env: Env, prompt: string, history: ConversationMessage[] = []): Promise<string> {
+  const messages = [{ role: "system" as const, content: "تو یک دستیار مفید هستی. هرگز secret تولید یا افشا نکن." }, ...history, { role: "user" as const, content: prompt }];
+  const result = await env.AI.run(env.AI_MODEL ?? "@cf/meta/llama-3.2-1b-instruct", { messages, max_tokens: 1200 }) as { response?: string };
   return result.response ?? "پاسخی دریافت نشد.";
 }
 
@@ -147,6 +170,16 @@ export class BotState {
     const path = new URL(request.url).pathname;
     if (path === "/stop") await this.state.storage.put("stopped", true);
     if (path === "/resume") await this.state.storage.put("stopped", false);
+    if (path === "/clear") await this.state.storage.delete("history");
+    if (path === "/history" && request.method === "POST") {
+      const body = await request.json() as { user?: ConversationMessage; assistant?: ConversationMessage };
+      const history = (await this.state.storage.get<ConversationMessage[]>("history")) ?? [];
+      if (body.user?.content && body.assistant?.content) {
+        history.push({ role: "user", content: body.user.content.slice(0, 4000) }, { role: "assistant", content: body.assistant.content.slice(0, 4000) });
+        await this.state.storage.put("history", history.slice(-12));
+      }
+    }
+    if (path === "/history" && request.method === "GET") return json({ history: (await this.state.storage.get<ConversationMessage[]>("history")) ?? [] });
     return json({ stopped: (await this.state.storage.get<boolean>("stopped")) ?? false });
   }
 }
