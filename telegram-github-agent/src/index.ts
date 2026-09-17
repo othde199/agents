@@ -15,9 +15,9 @@ type TelegramUpdate = { message?: { chat: { id: number }; text?: string; from?: 
 type GithubFile = { content: string; sha: string; encoding: string; size: number };
 type ConversationMessage = { role: "user" | "assistant"; content: string };
 type ProjectMemory = { history: ConversationMessage[]; summary: string; preferences: string[] };
-type MemoryStore = { activeProject: string; projects: Record<string, ProjectMemory> };
+type MemoryStore = { activeProject: string; repo?: string; projects: Record<string, ProjectMemory> };
 
-const HELP = `من یک ایجنت هوش مصنوعی هستم و می‌توانم درباره پروژه، برنامه‌نویسی و موضوعات عمومی پاسخ بدهم. برای اطلاعات جدید، وب را هم جست‌وجو می‌کنم و حافظه مکالمه دارم.\n\nدستورات مدیریتی:\n/status — وضعیت اتصال\n/repo — ریپوزیتوری فعال\n/project <نام> — انتخاب حافظه جدا برای یک پروژه\n/ask <سؤال> — سؤال از ایجنت\n/edit <درخواست> — تحلیل و ثبت تغییر کد\n/remember <ترجیح یا نکته> — ذخیره در حافظه بلندمدت\n/search <عبارت> — جست‌وجو در تاریخچه\n/clear — پاک‌کردن حافظه پروژه فعال\n/stop — توقف پاسخ‌گویی\n/resume — ادامه فعالیت\n\nمی‌توانید سؤال را بدون /ask هم بفرستید.`;
+const HELP = `🤖 Agent Think — نسخه Free\n\nپیام را مستقیم بفرست؛ Agent خودش تصمیم می‌گیرد آیا جست‌وجوی وب لازم است یا نه.\n\n/search <عبارت> — جست‌وجوی اجباری وب\n/repo owner/name — ذخیره ریپو برای زمینه پاسخ\n/repo — نمایش ریپوی ذخیره‌شده\n/status — وضعیت Worker\n/clear — پاک‌کردن ریپوی ذخیره‌شده؛ ریپوزیتوری GitHub حذف نمی‌شود\n/ask <سؤال> — پرسش از ایجنت\n/project <نام> — انتخاب حافظه جدا برای پروژه\n/remember <نکته> — ذخیره ترجیح در حافظه بلندمدت\n/history <عبارت> — جست‌وجو در تاریخچه مکالمه\n/clear-memory — پاک‌کردن حافظه مکالمه پروژه فعال\n/stop — توقف پاسخ‌گویی\n/resume — ادامه فعالیت`;
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -64,14 +64,18 @@ async function setupWebhook(url: URL, env: Env): Promise<Response> {
 async function handleMessage(chatId: number, text: string, env: Env): Promise<void> {
   if (text === "/start" || text === "/help") return sendTelegram(chatId, HELP, env);
   if (text === "/status") return sendTelegram(chatId, `✅ فعال\nریپو: ${env.GITHUB_REPO}\nشاخه: ${env.GITHUB_DEFAULT_BRANCH}\nمدل: ${env.AI_MODEL ?? "پیش‌فرض"}`, env);
-  if (text === "/repo") return sendTelegram(chatId, `ریپوزیتوری فعال: https://github.com/${env.GITHUB_REPO}\nشاخه: ${env.GITHUB_DEFAULT_BRANCH}`, env);
+  if (text === "/repo") return showRepo(chatId, env);
+  if (text.startsWith("/repo ")) return saveRepo(chatId, text.slice(6).trim(), env);
   if (text === "/project") return sendTelegram(chatId, "نام پروژه را بعد از /project بنویسید.\nمثال: /project ربات تلگرام", env);
   if (text.startsWith("/project ")) return switchProject(chatId, text.slice(9).trim(), env);
   if (text === "/remember") return sendTelegram(chatId, "نکته یا ترجیح را بعد از /remember بنویسید.", env);
   if (text.startsWith("/remember ")) return rememberPreference(chatId, text.slice(10).trim(), env);
   if (text === "/search") return sendTelegram(chatId, "عبارت جست‌وجو را بعد از /search بنویسید.", env);
-  if (text.startsWith("/search ")) return searchHistory(chatId, text.slice(8).trim(), env);
-  if (text === "/clear") return clearConversation(chatId, env);
+  if (text.startsWith("/search ")) return forcedWebSearch(chatId, text.slice(8).trim(), env);
+  if (text === "/history") return sendTelegram(chatId, "عبارت جست‌وجو را بعد از /history بنویسید.", env);
+  if (text.startsWith("/history ")) return searchHistory(chatId, text.slice(9).trim(), env);
+  if (text === "/clear") return clearSavedRepo(chatId, env);
+  if (text === "/clear-memory") return clearConversation(chatId, env);
   if (text === "/ask") return sendTelegram(chatId, "سؤال را بعد از /ask بنویسید.\nمثال: /ask ساختار این پروژه چیست؟", env);
   if (text.startsWith("/ask ")) return agentReply(chatId, text.slice(5).trim(), env);
   if (text === "/edit") return sendTelegram(chatId, "درخواست تغییر را بعد از /edit بنویسید.", env);
@@ -82,19 +86,20 @@ async function handleMessage(chatId: number, text: string, env: Env): Promise<vo
 async function agentReply(chatId: number, question: string, env: Env): Promise<void> {
   if (!question) return sendTelegram(chatId, "سؤال خالی است.", env);
   await sendTelegram(chatId, "⏳ در حال فکر کردن...", env);
-  const repoContext = needsRepo(question) ? await projectContext(env) : "";
-  const webContext = needsWeb(question) ? await webSearch(question) : "";
   const state = env.BOT_STATE.get(env.BOT_STATE.idFromName(String(chatId)));
   const memory = await readMemory(state);
-  const prompt = `تو یک ایجنت عمومی و دستیار برنامه‌نویسی هستی. به فارسی و دقیق جواب بده؛ اگر سؤال انگلیسی بود می‌توانی انگلیسی جواب بدهی. اگر اطلاعات کافی نیست صادقانه بگو. از context زیر و حافظه استفاده کن.\n\nپروژه فعال: ${memory.activeProject}\nخلاصه حافظه: ${memory.project.summary}\nترجیحات کاربر: ${memory.project.preferences.join(" | ")}\n${repoContext}\n${webContext}\nسؤال کاربر: ${question}`;
+  const activeEnv = memory.repo ? { ...env, GITHUB_REPO: memory.repo } : env;
+  const repoContext = needsRepo(question) ? await projectContext(activeEnv) : "";
+  const webContext = needsWeb(question) ? await webSearch(question) : "";
+  const prompt = `تو یک ایجنت عمومی و دستیار برنامه‌نویسی هستی. به فارسی و دقیق جواب بده؛ اگر سؤال انگلیسی بود می‌توانی انگلیسی جواب بدهی. اگر اطلاعات کافی نیست صادقانه بگو. از context زیر و حافظه استفاده کن.\n\nریپوی زمینه: ${activeEnv.GITHUB_REPO}\nپروژه فعال: ${memory.activeProject}\nخلاصه حافظه: ${memory.project.summary}\nترجیحات کاربر: ${memory.project.preferences.join(" | ")}\n${repoContext}\n${webContext}\nسؤال کاربر: ${question}`;
   const answer = await ai(env, prompt, memory.project.history);
   await appendMemory(state, { role: "user", content: question }, { role: "assistant", content: answer });
   return sendTelegram(chatId, answer, env);
 }
 
-async function readMemory(state: DurableObjectStub): Promise<{ activeProject: string; project: ProjectMemory }> {
+async function readMemory(state: DurableObjectStub): Promise<{ activeProject: string; repo?: string; project: ProjectMemory }> {
   const response = await state.fetch("https://bot-state/memory");
-  return await response.json() as { activeProject: string; project: ProjectMemory };
+  return await response.json() as { activeProject: string; repo?: string; project: ProjectMemory };
 }
 
 async function appendMemory(state: DurableObjectStub, user: ConversationMessage, assistant: ConversationMessage): Promise<void> {
@@ -105,6 +110,33 @@ async function clearConversation(chatId: number, env: Env): Promise<void> {
   const state = env.BOT_STATE.get(env.BOT_STATE.idFromName(String(chatId)));
   await state.fetch("https://bot-state/clear", { method: "POST" });
   return sendTelegram(chatId, "🧹 حافظه پروژه فعال پاک شد.", env);
+}
+
+async function showRepo(chatId: number, env: Env): Promise<void> {
+  const state = env.BOT_STATE.get(env.BOT_STATE.idFromName(String(chatId)));
+  const data = await (await state.fetch("https://bot-state/repo")).json() as { repo?: string };
+  return sendTelegram(chatId, `ریپوزیتوری متصل: ${data.repo ?? env.GITHUB_REPO}\n\nبرای ذخیره ریپو: /repo owner/name\nبرای پاک‌کردن ریپوی ذخیره‌شده: /clear`, env);
+}
+
+async function saveRepo(chatId: number, repo: string, env: Env): Promise<void> {
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) return sendTelegram(chatId, "فرمت ریپو باید owner/name باشد.\nمثال: /repo othde199/agents", env);
+  const state = env.BOT_STATE.get(env.BOT_STATE.idFromName(String(chatId)));
+  await state.fetch("https://bot-state/repo", { method: "POST", body: JSON.stringify({ repo }) });
+  return sendTelegram(chatId, `✅ ریپو برای زمینه پاسخ ذخیره شد:\nhttps://github.com/${repo}`, env);
+}
+
+async function clearSavedRepo(chatId: number, env: Env): Promise<void> {
+  const state = env.BOT_STATE.get(env.BOT_STATE.idFromName(String(chatId)));
+  await state.fetch("https://bot-state/repo", { method: "DELETE" });
+  return sendTelegram(chatId, "🧹 ریپوی ذخیره‌شده پاک شد. خود ریپوزیتوری GitHub حذف نشده است و حافظه مکالمه هم باقی می‌ماند.", env);
+}
+
+async function forcedWebSearch(chatId: number, query: string, env: Env): Promise<void> {
+  if (!query) return sendTelegram(chatId, "عبارت جست‌وجو را بعد از /search بنویسید.", env);
+  await sendTelegram(chatId, "🌐 در حال جست‌وجوی وب...", env);
+  const results = await webSearch(query);
+  const answer = await ai(env, `با استفاده از نتایج جست‌وجوی زیر، به فارسی دقیق پاسخ بده. اگر نتیجه کافی نیست صادقانه بگو.\n${results}\nسؤال: ${query}`);
+  return sendTelegram(chatId, answer, env);
 }
 
 async function switchProject(chatId: number, name: string, env: Env): Promise<void> {
@@ -204,6 +236,16 @@ export class BotState {
       store.projects[store.activeProject] = emptyProject();
       await this.state.storage.put("memory", store);
     }
+    if (path === "/repo" && request.method === "POST") {
+      const body = await request.json() as { repo?: string };
+      store.repo = body.repo?.trim();
+      await this.state.storage.put("memory", store);
+    }
+    if (path === "/repo" && request.method === "DELETE") {
+      delete store.repo;
+      await this.state.storage.put("memory", store);
+    }
+    if (path === "/repo" && request.method === "GET") return json({ repo: store.repo });
     if (path === "/project" && request.method === "POST") {
       const body = await request.json() as { name?: string };
       if (body.name?.trim()) {
@@ -220,7 +262,7 @@ export class BotState {
         await this.state.storage.put("memory", store);
       }
     }
-    if (path === "/memory" && request.method === "GET") return json({ activeProject: store.activeProject, project: store.projects[store.activeProject] });
+    if (path === "/memory" && request.method === "GET") return json({ activeProject: store.activeProject, repo: store.repo, project: store.projects[store.activeProject] });
     if (path === "/memory" && request.method === "POST") {
       const body = await request.json() as { user?: ConversationMessage; assistant?: ConversationMessage };
       const project = store.projects[store.activeProject] ??= emptyProject();
