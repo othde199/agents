@@ -179,14 +179,14 @@ async function agentReply(chatId: number, question: string, env: Env): Promise<v
   const repoEnv = await resolveRepoEnv(activeEnv);
   const repoContext = needsRepo(question) ? await projectContext(repoEnv) : "";
   const prompt = `تو یک ایجنت عمومی و دستیار برنامه‌نویسی هستی. به فارسی و دقیق جواب بده. اگر سؤال به اطلاعات زنده، آخرین نسخه، خبر، قیمت، سایت یا URL نیاز دارد از ابزار search_web استفاده کن؛ از حافظه‌ات حدس نزن. اگر ابزار نتیجه کافی نداد، صادقانه بگو اطلاعات قابل‌تأیید نیست.\n\n${SKILL_ROUTER_INSTRUCTION}\n${skillsPrompt()}\n\nریپوی زمینه: ${repoEnv.GITHUB_REPO}\nپروژه فعال: ${memory.activeProject}\nخلاصه حافظه: ${memory.project.summary}\nترجیحات کاربر: ${memory.project.preferences.join(" | ")}\n${repoContext}\nسؤال کاربر: ${question}`;
-  const toolResult = await aiWithSearchTool(repoEnv, prompt, memory.project.history);
+  const toolResult = await aiWithSearchTool(repoEnv, prompt, question, memory.project.history);
   const answer = toolResult.answer;
   await appendMemory(state, { role: "user", content: question }, { role: "assistant", content: answer });
   const sources = [...toolResult.context.matchAll(/(?:URL|SOURCE):\s*(https?:\/\/[^\s]+)/g)].map(match => match[1]).slice(0, 5);
   return sendTelegram(chatId, sources.length ? `${answer}\n\nمنابع بررسی‌شده:\n${sources.join("\n")}` : answer, env);
 }
 
-async function aiWithSearchTool(env: Env, prompt: string, history: ConversationMessage[] = []): Promise<{ answer: string; context: string }> {
+async function aiWithSearchTool(env: Env, prompt: string, userQuestion: string, history: ConversationMessage[] = []): Promise<{ answer: string; context: string }> {
   const messages = [{ role: "system" as const, content: `تو یک ایجنت دقیق هستی. برای اطلاعات به‌روز از ابزار استفاده کن و هرگز موفقیت یا منبعی را جعل نکن.\n${SKILL_ROUTER_INSTRUCTION}\n${skillsPrompt()}` }, ...history.slice(-6), { role: "user" as const, content: prompt }];
   const result = await env.AI.run(env.AI_MODEL ?? "@cf/meta/llama-3.3-70b-instruct-fp8-fast", { messages, max_tokens: 1800, temperature: 0.2, tools: [{ name: "search_web", description: "Search the public web and read pages relevant to the user's question. Use this for current or unknown information.", parameters: { type: "object", properties: { query: { type: "string", description: "The exact web search query" } }, required: ["query"] } }] }) as { response?: unknown; tool_calls?: unknown; result?: { tool_calls?: unknown; response?: unknown } };
   const calls = result.tool_calls ?? result.result?.tool_calls;
@@ -194,9 +194,9 @@ async function aiWithSearchTool(env: Env, prompt: string, history: ConversationM
   const tool = toolList.find(call => call.name === "search_web" || call.function?.name === "search_web");
   if (!tool) {
     const modelAnswer = typeof result.response === "string" ? result.response : JSON.stringify(result.response ?? result.result?.response ?? "پاسخی دریافت نشد.");
-    if (!needsWeb(prompt) || !/قابل.?تأیید|اطلاعات کافی|نمی.?دانم|cannot|don't know|unknown/i.test(modelAnswer)) return { answer: modelAnswer, context: "" };
-    const fallbackContext = await webSearch(prompt);
-    const fallbackAnswer = await ai(env, `${prompt}\n\nابزار search_web به‌صورت خودکار فراخوانی نشد. این نتیجه جست‌وجوی اجباری است:\n${fallbackContext}\n\nفقط بر اساس شواهد پاسخ بده و منابع را ذکر کن.`, history);
+    if (!needsWeb(userQuestion) || !/قابل.?تأیید|اطلاعات کافی|نمی.?دانم|cannot|don't know|unknown/i.test(modelAnswer)) return { answer: modelAnswer, context: "" };
+    const fallbackContext = await webSearch(userQuestion);
+    const fallbackAnswer = await ai(env, `${prompt}\n\nابزار search_web به‌صورت خودکار فراخوانی نشد. این نتیجه جست‌وجوی اجباری برای سؤال کاربر است:\n${fallbackContext}\n\nفقط بر اساس شواهد پاسخ بده و منابع را ذکر کن.`, history);
     return { answer: fallbackAnswer, context: fallbackContext };
   }
   const rawArguments = tool.arguments ?? tool.function?.arguments;
