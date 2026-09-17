@@ -18,6 +18,14 @@ type ConversationMessage = { role: "user" | "assistant"; content: string };
 type ProjectMemory = { history: ConversationMessage[]; summary: string; preferences: string[] };
 type MemoryStore = { activeProject: string; repo?: string; projects: Record<string, ProjectMemory> };
 
+const MAIN_MENU = { inline_keyboard: [
+  [{ text: "🤖 سؤال از ایجنت", callback_data: "menu:ask" }, { text: "🌐 جست‌وجوی وب", callback_data: "menu:search" }],
+  [{ text: "📚 فهرست ریپوها", callback_data: "menu:repos" }, { text: "📌 ریپوی فعال", callback_data: "menu:repo" }],
+  [{ text: "📊 وضعیت", callback_data: "menu:status" }, { text: "🧠 حافظه", callback_data: "menu:memory" }],
+  [{ text: "✏️ تغییر کد", callback_data: "menu:edit" }, { text: "❓ راهنما", callback_data: "menu:help" }],
+  [{ text: "⏸ توقف", callback_data: "menu:stop" }, { text: "▶️ ادامه", callback_data: "menu:resume" }]
+] };
+
 const HELP = `🤖 Agent Think — نسخه Free\n\nپیام را مستقیم بفرست؛ Agent خودش تصمیم می‌گیرد آیا بررسی پروژه یا جست‌وجوی وب لازم است.\n\nدستورات اصلی:\n/ask <سؤال> — پرسش از ایجنت\n/search <عبارت> — جست‌وجوی اجباری وب\n/repos — نمایش همه ریپوهای قابل‌دسترسی GitHub\n/repo owner/name — ذخیره ریپو برای زمینه پاسخ\n/repo — نمایش ریپوی ذخیره‌شده\n/status — وضعیت Worker\n\nمدیریت حافظه:\n/project <نام> — انتخاب حافظه جدا برای پروژه\n/remember <نکته> — ذخیره ترجیح در حافظه بلندمدت\n/history <عبارت> — جست‌وجو در تاریخچه مکالمه\n/clear-memory — پاک‌کردن حافظه پروژه فعال\n/clear — پاک‌کردن ریپوی ذخیره‌شده؛ ریپوزیتوری GitHub حذف نمی‌شود\n\nکنترل ربات:\n/stop — توقف پاسخ‌گویی\n/resume — ادامه فعالیت\n/help — نمایش این راهنما\n\nبرای تغییر کد، از /edit <درخواست> استفاده کنید.`;
 
 const TELEGRAM_COMMANDS = [
@@ -57,7 +65,7 @@ export default {
         const index = Number(callback.data.slice(8));
         const option = await (await stateForChat(env, chatId).fetch(`https://bot-state/repo-option/${index}`)).json() as { repo?: string };
         if (option.repo) await saveRepo(chatId, option.repo, env);
-      }
+      } else if (callback.data?.startsWith("menu:")) await handleMenuCallback(chatId, callback.data.slice(5), env);
       return json({ ok: true });
     }
     if (!text) return json({ ok: true });
@@ -76,6 +84,12 @@ export default {
     }
     const stopped = (await (await state.fetch("https://bot-state/status")).json()) as { stopped?: boolean };
     if (stopped.stopped) return json({ ok: true });
+    const pending = await (await state.fetch("https://bot-state/pending")).json() as { action?: string };
+    if (pending.action) {
+      await state.fetch("https://bot-state/pending", { method: "DELETE" });
+      await handleMessage(chatId, `/${pending.action} ${text}`, env);
+      return json({ ok: true });
+    }
     try { await handleMessage(chatId, text, env); } catch (error) {
       console.error("telegram handler failed", error);
       await sendTelegram(chatId, "❌ اجرای درخواست شکست خورد. لاگ Worker را بررسی کنید.", env);
@@ -95,7 +109,7 @@ async function setupWebhook(url: URL, env: Env): Promise<Response> {
 }
 
 async function handleMessage(chatId: number, text: string, env: Env): Promise<void> {
-  if (text === "/start" || text === "/help") return sendTelegram(chatId, HELP, env);
+  if (text === "/start" || text === "/help") return sendTelegram(chatId, HELP, env, MAIN_MENU);
   if (text === "/status") return showStatus(chatId, env);
   if (text === "/repo") return showRepo(chatId, env);
   if (text.startsWith("/repo ")) return saveRepo(chatId, text.slice(6).trim(), env);
@@ -115,6 +129,23 @@ async function handleMessage(chatId: number, text: string, env: Env): Promise<vo
   if (text === "/edit") return sendTelegram(chatId, "درخواست تغییر را بعد از /edit بنویسید.", env);
   if (text.startsWith("/edit ")) return editCode(chatId, text.slice(6).trim(), env);
   return agentReply(chatId, text, env);
+}
+
+async function handleMenuCallback(chatId: number, action: string, env: Env): Promise<void> {
+  if (action === "status") return showStatus(chatId, env);
+  if (action === "repos") return listRepositories(chatId, env);
+  if (action === "repo") return showRepo(chatId, env);
+  if (action === "help") return sendTelegram(chatId, HELP, env, MAIN_MENU);
+  if (action === "memory") return sendTelegram(chatId, "🧠 مدیریت حافظه را انتخاب کنید:", env, { inline_keyboard: [[{ text: "💾 ذخیره ترجیح", callback_data: "menu:remember" }, { text: "📁 انتخاب پروژه", callback_data: "menu:project" }], [{ text: "🔎 جست‌وجوی تاریخچه", callback_data: "menu:history" }, { text: "🧹 پاک‌کردن حافظه", callback_data: "menu:clear_memory" }], [{ text: "⬅️ منوی اصلی", callback_data: "menu:help" }]] });
+  if (action === "stop") { await stateForChat(env, chatId).fetch("https://bot-state/stop", { method: "POST" }); return sendTelegram(chatId, "⏸ ربات متوقف شد.", env, MAIN_MENU); }
+  if (action === "resume") { await stateForChat(env, chatId).fetch("https://bot-state/resume", { method: "POST" }); return sendTelegram(chatId, "▶️ ربات دوباره فعال شد.", env, MAIN_MENU); }
+  if (action === "clear_memory") return clearConversation(chatId, env);
+  const actions = ["ask", "search", "edit", "remember", "project", "history"];
+  if (actions.includes(action)) {
+    await stateForChat(env, chatId).fetch("https://bot-state/pending", { method: "POST", body: JSON.stringify({ action }) });
+    const labels: Record<string, string> = { ask: "سؤال خود را بفرستید", search: "عبارت جست‌وجوی وب را بفرستید", edit: "درخواست تغییر کد را بفرستید", remember: "ترجیح یا نکته را بفرستید", project: "نام پروژه را بفرستید", history: "عبارت جست‌وجو در تاریخچه را بفرستید" };
+    return sendTelegram(chatId, `✍️ ${labels[action]}:`, env, MAIN_MENU);
+  }
 }
 
 async function agentReply(chatId: number, question: string, env: Env): Promise<void> {
@@ -321,6 +352,12 @@ export class BotState {
       const repos = (await this.state.storage.get<string[]>("repo-options")) ?? [];
       return json({ repo: Number.isInteger(index) && index >= 0 ? repos[index] : undefined });
     }
+    if (path === "/pending" && request.method === "POST") {
+      const body = await request.json() as { action?: string };
+      await this.state.storage.put("pending", body.action ?? "");
+    }
+    if (path === "/pending" && request.method === "DELETE") await this.state.storage.delete("pending");
+    if (path === "/pending" && request.method === "GET") return json({ action: await this.state.storage.get<string>("pending") });
     if (path === "/project" && request.method === "POST") {
       const body = await request.json() as { name?: string };
       if (body.name?.trim()) {
