@@ -309,7 +309,7 @@ async function projectContext(env: Env): Promise<string> {
 async function webSearch(question: string): Promise<string> {
   try {
     const directUrls = [...question.matchAll(/https?:\/\/[^\s<>"'،،]+/gi)].map(match => match[0].replace(/[).،،]+$/g, ""));
-    const officialUrls = /node\s*\.?(?:js|جی\s*اس)|نود\s*جی\s*اس/i.test(question) ? ["https://nodejs.org/dist/index.json"] : [];
+    const officialUrls = /node\s*\.?(?:js|جی\s*اس)|نود\s*جی\s*اس/i.test(question) ? ["https://nodejs.org/dist/index.json"] : /پابجی|pubg/i.test(question) && /موبایل|mobile|اندروید|android|ios|آیفون/i.test(question) ? ["https://play.google.com/store/apps/details?id=com.tencent.ig&hl=en&gl=US", "https://pubgmobile.com/", "https://www.pubgmobile.com/"] : /پابجی|pubg/i.test(question) ? ["https://pubg.com/news", "https://store.steampowered.com/app/578080/PUBG_BATTLEGROUNDS/"] : [];
     const searchResults = directUrls.length ? directUrls.map(url => ({ url, title: url, snippet: "" })) : await searchResultDetails(question);
     const urls = directUrls.length ? directUrls : [...officialUrls, ...searchResults.map(item => item.url)];
     if (!urls.length) return "WEB SEARCH: no results found";
