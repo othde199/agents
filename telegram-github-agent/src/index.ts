@@ -366,7 +366,7 @@ function applyDeterministicEdit(path: string, content: string, instruction: stri
   const packageName = dependency[1];
   const oldVersion = dependency[2];
   const newVersion = dependency[3];
-  const versionPattern = new RegExp(`(["']${escapeRegExp(packageName)}["']\\s*:\\s*["'])[^"']+(["'])`);
+  const versionPattern = new RegExp(`(["']${escapeRegExp(packageName)}["']\\s*:\\s*["'])[^"']+(["'])`, "i");
   if (!versionPattern.test(content)) return undefined;
   return { content: content.replace(versionPattern, `$1^${newVersion}$2`), summary: `نسخه ${packageName} از ${oldVersion} یا نسخه فعلی به ${newVersion} تغییر کرد` };
 }
