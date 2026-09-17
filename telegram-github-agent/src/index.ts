@@ -282,7 +282,7 @@ async function resolveRepoEnv(env: Env): Promise<Env> {
 
 function needsRepo(question: string): boolean { return /پروژه|ریپو|کد|فایل|گیت.?هاب|repo|code|file|github|worker|agents|package|wrangler|typescript|javascript|ساختار/i.test(question); }
 function looksLikeEditRequest(question: string): boolean { return /(?:می.?خوام|میخام|می.?خواهم|تغییر بده|عوض کن|جایگزین کن|change|replace|update|modify|set)/i.test(question) && /(?:رو\s+به|به|to|with|به‌جای|instead)/i.test(question); }
-function needsWeb(question: string): boolean { return /اینترنت|وب|جست.?جو|آخرین|جدیدترین|امروز|قیمت|خبر|نسخه جدید|مستندات|internet|web|search|latest|today|news|price|documentation|۲۰۲|202[4-9]|https?:\/\//i.test(question); }
+function needsWeb(question: string): boolean { return /اینترنت|وب|سایت|صفحه|لینک|برو داخل|محتوای سایت|جست.?جو|آخرین|جدیدترین|امروز|قیمت|خبر|نسخه جدید|مستندات|internet|web|site|page|url|link|search|latest|today|news|price|documentation|۲۰۲|202[4-9]|https?:\/\//i.test(question); }
 
 async function projectContext(env: Env): Promise<string> {
   let files: string[] = [];
@@ -306,11 +306,42 @@ async function projectContext(env: Env): Promise<string> {
 
 async function webSearch(question: string): Promise<string> {
   try {
-    const response = await fetch(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(question)}`, { headers: { "user-agent": "telegram-github-agent/1.0" } });
-    const html = await response.text();
-    const results = [...html.matchAll(/result__a[^>]*href="([^"]+)"[^>]*>(.*?)<\/a>/g)].slice(0, 5).map(match => `${stripHtml(match[2])}: ${match[1]}`);
-    return results.length ? `WEB SEARCH RESULTS (verify before relying):\n${results.join("\n")}` : "WEB SEARCH: no results found";
+    const directUrls = [...question.matchAll(/https?:\/\/[^\s<>"'،،]+/gi)].map(match => match[0].replace(/[).،،]+$/g, ""));
+    const urls = directUrls.length ? directUrls : await searchResultUrls(question);
+    if (!urls.length) return "WEB SEARCH: no results found";
+    const pages: string[] = [];
+    for (const url of urls.slice(0, 4)) {
+      const page = await fetchPageText(url);
+      if (page) pages.push(`SOURCE: ${url}\n${page}`);
+    }
+    return pages.length ? `WEB SEARCH AND PAGE CONTENT (use sources carefully):\n${pages.join("\n\n").slice(0, 24000)}` : `WEB SEARCH RESULTS:\n${urls.join("\n")}`;
   } catch { return "WEB SEARCH: unavailable; پاسخ را بر اساس دانش عمومی بده و بگو جست‌وجوی زنده در دسترس نبود."; }
+}
+
+async function searchResultUrls(question: string): Promise<string[]> {
+  const response = await fetch(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(question)}`, { headers: { "user-agent": "telegram-github-agent/1.0" } });
+  const html = await response.text();
+  return [...html.matchAll(/result__a[^>]*href="([^"]+)"[^>]*>(.*?)<\/a>/g)].slice(0, 6).map(match => {
+    const raw = match[1].replace(/&amp;/g, "&");
+    try { return new URL(raw, "https://html.duckduckgo.com").searchParams.get("uddg") ?? raw; } catch { return raw; }
+  }).filter(url => /^https?:\/\//i.test(url));
+}
+
+async function fetchPageText(url: string): Promise<string> {
+  try {
+    const parsed = new URL(url);
+    if (!/^https?:$/.test(parsed.protocol)) return "";
+    const response = await fetch(parsed.toString(), { headers: { "user-agent": "telegram-github-agent/1.0", accept: "text/html,text/plain,application/json" }, redirect: "follow" });
+    if (!response.ok) return `[page unavailable: HTTP ${response.status}]`;
+    const contentType = response.headers.get("content-type") ?? "";
+    const raw = (await response.text()).slice(0, 120000);
+    if (contentType.includes("application/json")) return raw.slice(0, 7000);
+    return stripPageText(raw).slice(0, 7000);
+  } catch { return ""; }
+}
+
+function stripPageText(html: string): string {
+  return html.replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<noscript[\s\S]*?<\/noscript>/gi, " ").replace(/<svg[\s\S]*?<\/svg>/gi, " ").replace(/<[^>]+>/g, " ").replace(/&nbsp;/gi, " ").replace(/&amp;/gi, "&").replace(/&quot;/gi, '"').replace(/&#39;|&apos;/gi, "'").replace(/\s+/g, " ").trim();
 }
 
 async function editCode(chatId: number, instruction: string, env: Env): Promise<void> {
