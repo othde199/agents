@@ -11,7 +11,7 @@ export interface Env {
   BOT_STATE: DurableObjectNamespace;
 }
 
-type TelegramUpdate = { message?: { chat: { id: number }; text?: string; from?: { id: number } } };
+type TelegramUpdate = { message?: { chat: { id: number }; text?: string; from?: { id: number } }; callback_query?: { id: string; data?: string; message?: { chat: { id: number } } } };
 type GithubFile = { content: string; sha: string; encoding: string; size: number };
 type GithubRepo = { full_name: string; private: boolean; html_url: string; default_branch?: string; archived?: boolean };
 type ConversationMessage = { role: "user" | "assistant"; content: string };
@@ -47,9 +47,19 @@ export default {
     if (request.method !== "POST" || url.pathname !== "/telegram/webhook") return new Response("Not found", { status: 404 });
     if (env.TELEGRAM_WEBHOOK_SECRET && request.headers.get("X-Telegram-Bot-Api-Secret-Token") !== env.TELEGRAM_WEBHOOK_SECRET) return new Response("Unauthorized", { status: 401 });
     const update = (await request.json()) as TelegramUpdate;
-    const chatId = update.message?.chat.id;
+    const callback = update.callback_query;
+    const chatId = update.message?.chat.id ?? callback?.message?.chat.id;
     const text = update.message?.text?.trim();
-    if (!chatId || !text || !isAllowedChat(chatId, env.ALLOWED_CHAT_IDS)) return json({ ok: true });
+    if (!chatId || (!text && !callback) || !isAllowedChat(chatId, env.ALLOWED_CHAT_IDS)) return json({ ok: true });
+    if (callback) {
+      await answerCallback(callback.id, env);
+      if (callback.data?.startsWith("repo:")) {
+        const repo = callback.data.slice(5);
+        await saveRepo(chatId, repo, env);
+      }
+      return json({ ok: true });
+    }
+    if (!text) return json({ ok: true });
     const state = env.BOT_STATE.get(env.BOT_STATE.idFromName(String(chatId)));
     if (text === "/stop") {
       await state.fetch("https://bot-state/stop", { method: "POST" });
@@ -150,10 +160,12 @@ async function listRepositories(chatId: number, env: Env): Promise<void> {
     if (batch.length < 100) break;
   }
   if (!repositories.length) return sendTelegram(chatId, "هیچ ریپویی با این GitHub Token پیدا نشد.", env);
-  const lines = repositories.map((repo, index) => `${index + 1}. ${repo.private ? "🔒 خصوصی" : "🌐 عمومی"} ${repo.full_name}${repo.archived ? " (archived)" : ""}\n${repo.html_url}`);
-  const chunks: string[] = [];
-  for (let index = 0; index < lines.length; index += 15) chunks.push(lines.slice(index, index + 15).join("\n\n"));
-  for (let index = 0; index < chunks.length; index++) await sendTelegram(chatId, `📚 ریپوهای قابل‌دسترسی (${index + 1}/${chunks.length})\n\n${chunks[index]}`, env);
+  const chunks: GithubRepo[][] = [];
+  for (let index = 0; index < repositories.length; index += 30) chunks.push(repositories.slice(index, index + 30));
+  for (let index = 0; index < chunks.length; index++) {
+    const keyboard = chunks[index].map(repo => [{ text: `${repo.private ? "🔒" : "🌐"} ${repo.full_name}`, callback_data: `repo:${repo.full_name}` }]);
+    await sendTelegram(chatId, `📚 ریپوهای قابل‌دسترسی (${index + 1}/${chunks.length})\n\nبرای انتخاب، روی نام ریپو کلیک کنید:`, env, { inline_keyboard: keyboard });
+  }
 }
 
 async function saveRepo(chatId: number, repo: string, env: Env): Promise<void> {
@@ -251,8 +263,12 @@ async function github(path: string, env: Env, init: RequestInit = {}): Promise<u
   return response.json();
 }
 
-async function sendTelegram(chatId: number, text: string, env: Env): Promise<void> {
-  await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ chat_id: chatId, text: text.slice(0, 4000), disable_web_page_preview: true }) });
+async function sendTelegram(chatId: number, text: string, env: Env, replyMarkup?: unknown): Promise<void> {
+  await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ chat_id: chatId, text: text.slice(0, 4000), disable_web_page_preview: true, ...(replyMarkup ? { reply_markup: replyMarkup } : {}) }) });
+}
+
+async function answerCallback(callbackId: string, env: Env): Promise<void> {
+  await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/answerCallbackQuery`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ callback_query_id: callbackId, text: "ریپو انتخاب شد" }) });
 }
 
 function isAllowedChat(chatId: number, allow?: string): boolean { return !allow || allow.split(",").map(x => x.trim()).includes(String(chatId)); }
