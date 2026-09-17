@@ -14,8 +14,10 @@ export interface Env {
 type TelegramUpdate = { message?: { chat: { id: number }; text?: string; from?: { id: number } } };
 type GithubFile = { content: string; sha: string; encoding: string; size: number };
 type ConversationMessage = { role: "user" | "assistant"; content: string };
+type ProjectMemory = { history: ConversationMessage[]; summary: string; preferences: string[] };
+type MemoryStore = { activeProject: string; projects: Record<string, ProjectMemory> };
 
-const HELP = `من یک ایجنت هوش مصنوعی هستم و می‌توانم درباره پروژه، برنامه‌نویسی و موضوعات عمومی پاسخ بدهم. برای اطلاعات جدید، وب را هم جست‌وجو می‌کنم و تاریخچه کوتاه مکالمه را به خاطر می‌سپارم.\n\nدستورات مدیریتی:\n/status — وضعیت اتصال\n/repo — ریپوزیتوری فعال\n/ask <سؤال> — سؤال از ایجنت\n/edit <درخواست> — تحلیل و ثبت تغییر کد\n/clear — پاک‌کردن حافظه مکالمه\n/stop — توقف پاسخ‌گویی\n/resume — ادامه فعالیت\n\nمی‌توانید سؤال را بدون /ask هم بفرستید.`;
+const HELP = `من یک ایجنت هوش مصنوعی هستم و می‌توانم درباره پروژه، برنامه‌نویسی و موضوعات عمومی پاسخ بدهم. برای اطلاعات جدید، وب را هم جست‌وجو می‌کنم و حافظه مکالمه دارم.\n\nدستورات مدیریتی:\n/status — وضعیت اتصال\n/repo — ریپوزیتوری فعال\n/project <نام> — انتخاب حافظه جدا برای یک پروژه\n/ask <سؤال> — سؤال از ایجنت\n/edit <درخواست> — تحلیل و ثبت تغییر کد\n/remember <ترجیح یا نکته> — ذخیره در حافظه بلندمدت\n/search <عبارت> — جست‌وجو در تاریخچه\n/clear — پاک‌کردن حافظه پروژه فعال\n/stop — توقف پاسخ‌گویی\n/resume — ادامه فعالیت\n\nمی‌توانید سؤال را بدون /ask هم بفرستید.`;
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -63,6 +65,12 @@ async function handleMessage(chatId: number, text: string, env: Env): Promise<vo
   if (text === "/start" || text === "/help") return sendTelegram(chatId, HELP, env);
   if (text === "/status") return sendTelegram(chatId, `✅ فعال\nریپو: ${env.GITHUB_REPO}\nشاخه: ${env.GITHUB_DEFAULT_BRANCH}\nمدل: ${env.AI_MODEL ?? "پیش‌فرض"}`, env);
   if (text === "/repo") return sendTelegram(chatId, `ریپوزیتوری فعال: https://github.com/${env.GITHUB_REPO}\nشاخه: ${env.GITHUB_DEFAULT_BRANCH}`, env);
+  if (text === "/project") return sendTelegram(chatId, "نام پروژه را بعد از /project بنویسید.\nمثال: /project ربات تلگرام", env);
+  if (text.startsWith("/project ")) return switchProject(chatId, text.slice(9).trim(), env);
+  if (text === "/remember") return sendTelegram(chatId, "نکته یا ترجیح را بعد از /remember بنویسید.", env);
+  if (text.startsWith("/remember ")) return rememberPreference(chatId, text.slice(10).trim(), env);
+  if (text === "/search") return sendTelegram(chatId, "عبارت جست‌وجو را بعد از /search بنویسید.", env);
+  if (text.startsWith("/search ")) return searchHistory(chatId, text.slice(8).trim(), env);
   if (text === "/clear") return clearConversation(chatId, env);
   if (text === "/ask") return sendTelegram(chatId, "سؤال را بعد از /ask بنویسید.\nمثال: /ask ساختار این پروژه چیست؟", env);
   if (text.startsWith("/ask ")) return agentReply(chatId, text.slice(5).trim(), env);
@@ -77,27 +85,48 @@ async function agentReply(chatId: number, question: string, env: Env): Promise<v
   const repoContext = needsRepo(question) ? await projectContext(env) : "";
   const webContext = needsWeb(question) ? await webSearch(question) : "";
   const state = env.BOT_STATE.get(env.BOT_STATE.idFromName(String(chatId)));
-  const history = await readHistory(state);
-  const prompt = `تو یک ایجنت عمومی و دستیار برنامه‌نویسی هستی. به فارسی و دقیق جواب بده؛ اگر سؤال انگلیسی بود می‌توانی انگلیسی جواب بدهی. اگر اطلاعات کافی نیست صادقانه بگو. از context زیر استفاده کن و ادعای بدون منبع نکن.\n\n${repoContext}\n${webContext}\nسؤال کاربر: ${question}`;
-  const answer = await ai(env, prompt, history);
-  await appendHistory(state, { role: "user", content: question }, { role: "assistant", content: answer });
+  const memory = await readMemory(state);
+  const prompt = `تو یک ایجنت عمومی و دستیار برنامه‌نویسی هستی. به فارسی و دقیق جواب بده؛ اگر سؤال انگلیسی بود می‌توانی انگلیسی جواب بدهی. اگر اطلاعات کافی نیست صادقانه بگو. از context زیر و حافظه استفاده کن.\n\nپروژه فعال: ${memory.activeProject}\nخلاصه حافظه: ${memory.project.summary}\nترجیحات کاربر: ${memory.project.preferences.join(" | ")}\n${repoContext}\n${webContext}\nسؤال کاربر: ${question}`;
+  const answer = await ai(env, prompt, memory.project.history);
+  await appendMemory(state, { role: "user", content: question }, { role: "assistant", content: answer });
   return sendTelegram(chatId, answer, env);
 }
 
-async function readHistory(state: DurableObjectStub): Promise<ConversationMessage[]> {
-  const response = await state.fetch("https://bot-state/history");
-  const data = (await response.json()) as { history?: ConversationMessage[] };
-  return Array.isArray(data.history) ? data.history : [];
+async function readMemory(state: DurableObjectStub): Promise<{ activeProject: string; project: ProjectMemory }> {
+  const response = await state.fetch("https://bot-state/memory");
+  return await response.json() as { activeProject: string; project: ProjectMemory };
 }
 
-async function appendHistory(state: DurableObjectStub, user: ConversationMessage, assistant: ConversationMessage): Promise<void> {
-  await state.fetch("https://bot-state/history", { method: "POST", body: JSON.stringify({ user, assistant }) });
+async function appendMemory(state: DurableObjectStub, user: ConversationMessage, assistant: ConversationMessage): Promise<void> {
+  await state.fetch("https://bot-state/memory", { method: "POST", body: JSON.stringify({ user, assistant }) });
 }
 
 async function clearConversation(chatId: number, env: Env): Promise<void> {
   const state = env.BOT_STATE.get(env.BOT_STATE.idFromName(String(chatId)));
   await state.fetch("https://bot-state/clear", { method: "POST" });
-  return sendTelegram(chatId, "🧹 حافظه مکالمه پاک شد.", env);
+  return sendTelegram(chatId, "🧹 حافظه پروژه فعال پاک شد.", env);
+}
+
+async function switchProject(chatId: number, name: string, env: Env): Promise<void> {
+  if (!name) return sendTelegram(chatId, "نام پروژه خالی است.", env);
+  const state = env.BOT_STATE.get(env.BOT_STATE.idFromName(String(chatId)));
+  await state.fetch("https://bot-state/project", { method: "POST", body: JSON.stringify({ name }) });
+  return sendTelegram(chatId, `📁 پروژه فعال شد: ${name}\nحافظه این پروژه جداست.`, env);
+}
+
+async function rememberPreference(chatId: number, note: string, env: Env): Promise<void> {
+  if (!note) return sendTelegram(chatId, "نکته خالی است.", env);
+  const state = env.BOT_STATE.get(env.BOT_STATE.idFromName(String(chatId)));
+  await state.fetch("https://bot-state/preference", { method: "POST", body: JSON.stringify({ note }) });
+  return sendTelegram(chatId, "🧠 در حافظه بلندمدت ذخیره شد.", env);
+}
+
+async function searchHistory(chatId: number, query: string, env: Env): Promise<void> {
+  if (!query) return sendTelegram(chatId, "عبارت جست‌وجو خالی است.", env);
+  const state = env.BOT_STATE.get(env.BOT_STATE.idFromName(String(chatId)));
+  const data = await (await state.fetch("https://bot-state/search", { method: "POST", body: JSON.stringify({ query }) })).json() as { results?: ConversationMessage[] };
+  const results = data.results ?? [];
+  return sendTelegram(chatId, results.length ? `🔎 نتایج حافظه:\n${results.map(item => `${item.role === "user" ? "شما" : "ربات"}: ${item.content}`).join("\n\n").slice(0, 3800)}` : "نتیجه‌ای در حافظه پیدا نشد.", env);
 }
 
 function needsRepo(question: string): boolean { return /پروژه|ریپو|کد|فایل|گیت.?هاب|repo|code|file|github|worker|agents|package|wrangler|typescript|javascript|ساختار/i.test(question); }
@@ -170,16 +199,53 @@ export class BotState {
     const path = new URL(request.url).pathname;
     if (path === "/stop") await this.state.storage.put("stopped", true);
     if (path === "/resume") await this.state.storage.put("stopped", false);
-    if (path === "/clear") await this.state.storage.delete("history");
-    if (path === "/history" && request.method === "POST") {
-      const body = await request.json() as { user?: ConversationMessage; assistant?: ConversationMessage };
-      const history = (await this.state.storage.get<ConversationMessage[]>("history")) ?? [];
-      if (body.user?.content && body.assistant?.content) {
-        history.push({ role: "user", content: body.user.content.slice(0, 4000) }, { role: "assistant", content: body.assistant.content.slice(0, 4000) });
-        await this.state.storage.put("history", history.slice(-12));
+    const store = await this.getStore();
+    if (path === "/clear") {
+      store.projects[store.activeProject] = emptyProject();
+      await this.state.storage.put("memory", store);
+    }
+    if (path === "/project" && request.method === "POST") {
+      const body = await request.json() as { name?: string };
+      if (body.name?.trim()) {
+        store.activeProject = cleanProjectName(body.name);
+        store.projects[store.activeProject] ??= emptyProject();
+        await this.state.storage.put("memory", store);
       }
     }
-    if (path === "/history" && request.method === "GET") return json({ history: (await this.state.storage.get<ConversationMessage[]>("history")) ?? [] });
+    if (path === "/preference" && request.method === "POST") {
+      const body = await request.json() as { note?: string };
+      if (body.note?.trim()) {
+        const project = store.projects[store.activeProject] ??= emptyProject();
+        project.preferences = [...project.preferences, body.note.trim().slice(0, 500)].slice(-20);
+        await this.state.storage.put("memory", store);
+      }
+    }
+    if (path === "/memory" && request.method === "GET") return json({ activeProject: store.activeProject, project: store.projects[store.activeProject] });
+    if (path === "/memory" && request.method === "POST") {
+      const body = await request.json() as { user?: ConversationMessage; assistant?: ConversationMessage };
+      const project = store.projects[store.activeProject] ??= emptyProject();
+      if (body.user?.content && body.assistant?.content) {
+        project.history.push({ role: "user", content: body.user.content.slice(0, 4000) }, { role: "assistant", content: body.assistant.content.slice(0, 4000) });
+        if (project.history.length > 12) {
+          const old = project.history.splice(0, project.history.length - 8);
+          project.summary = `${project.summary}\n${old.map(item => `${item.role}: ${item.content}`).join("\n")}`.slice(-6000);
+        }
+        await this.state.storage.put("memory", store);
+      }
+    }
+    if (path === "/search" && request.method === "POST") {
+      const body = await request.json() as { query?: string };
+      const query = body.query?.toLowerCase() ?? "";
+      const results = Object.values(store.projects).flatMap(project => [...project.history, { role: "assistant" as const, content: project.summary }, ...project.preferences.map(content => ({ role: "assistant" as const, content }))]).filter(item => item.content.toLowerCase().includes(query)).slice(-10);
+      return json({ results });
+    }
     return json({ stopped: (await this.state.storage.get<boolean>("stopped")) ?? false });
   }
+
+  private async getStore(): Promise<MemoryStore> {
+    return (await this.state.storage.get<MemoryStore>("memory")) ?? { activeProject: "default", projects: { default: emptyProject() } };
+  }
 }
+
+function emptyProject(): ProjectMemory { return { history: [], summary: "", preferences: [] }; }
+function cleanProjectName(value: string): string { return value.trim().replace(/[^\p{L}\p{N}_ -]/gu, "").slice(0, 60) || "default"; }
