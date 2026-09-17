@@ -13,17 +13,19 @@ export interface Env {
 
 type TelegramUpdate = { message?: { chat: { id: number }; text?: string; from?: { id: number } } };
 type GithubFile = { content: string; sha: string; encoding: string; size: number };
+type GithubRepo = { full_name: string; private: boolean; html_url: string; default_branch?: string; archived?: boolean };
 type ConversationMessage = { role: "user" | "assistant"; content: string };
 type ProjectMemory = { history: ConversationMessage[]; summary: string; preferences: string[] };
 type MemoryStore = { activeProject: string; repo?: string; projects: Record<string, ProjectMemory> };
 
-const HELP = `🤖 Agent Think — نسخه Free\n\nپیام را مستقیم بفرست؛ Agent خودش تصمیم می‌گیرد آیا بررسی پروژه یا جست‌وجوی وب لازم است.\n\nدستورات اصلی:\n/ask <سؤال> — پرسش از ایجنت\n/search <عبارت> — جست‌وجوی اجباری وب\n/repo owner/name — ذخیره ریپو برای زمینه پاسخ\n/repo — نمایش ریپوی ذخیره‌شده\n/status — وضعیت Worker\n\nمدیریت حافظه:\n/project <نام> — انتخاب حافظه جدا برای پروژه\n/remember <نکته> — ذخیره ترجیح در حافظه بلندمدت\n/history <عبارت> — جست‌وجو در تاریخچه مکالمه\n/clear-memory — پاک‌کردن حافظه پروژه فعال\n/clear — پاک‌کردن ریپوی ذخیره‌شده؛ ریپوزیتوری GitHub حذف نمی‌شود\n\nکنترل ربات:\n/stop — توقف پاسخ‌گویی\n/resume — ادامه فعالیت\n/help — نمایش این راهنما\n\nبرای تغییر کد، از /edit <درخواست> استفاده کنید.`;
+const HELP = `🤖 Agent Think — نسخه Free\n\nپیام را مستقیم بفرست؛ Agent خودش تصمیم می‌گیرد آیا بررسی پروژه یا جست‌وجوی وب لازم است.\n\nدستورات اصلی:\n/ask <سؤال> — پرسش از ایجنت\n/search <عبارت> — جست‌وجوی اجباری وب\n/repos — نمایش همه ریپوهای قابل‌دسترسی GitHub\n/repo owner/name — ذخیره ریپو برای زمینه پاسخ\n/repo — نمایش ریپوی ذخیره‌شده\n/status — وضعیت Worker\n\nمدیریت حافظه:\n/project <نام> — انتخاب حافظه جدا برای پروژه\n/remember <نکته> — ذخیره ترجیح در حافظه بلندمدت\n/history <عبارت> — جست‌وجو در تاریخچه مکالمه\n/clear-memory — پاک‌کردن حافظه پروژه فعال\n/clear — پاک‌کردن ریپوی ذخیره‌شده؛ ریپوزیتوری GitHub حذف نمی‌شود\n\nکنترل ربات:\n/stop — توقف پاسخ‌گویی\n/resume — ادامه فعالیت\n/help — نمایش این راهنما\n\nبرای تغییر کد، از /edit <درخواست> استفاده کنید.`;
 
 const TELEGRAM_COMMANDS = [
   { command: "start", description: "شروع و نمایش راهنما" },
   { command: "help", description: "نمایش راهنمای کامل" },
   { command: "ask", description: "پرسش از ایجنت" },
   { command: "search", description: "جست‌وجوی اجباری وب" },
+  { command: "repos", description: "نمایش همه ریپوهای GitHub" },
   { command: "repo", description: "نمایش یا ذخیره ریپو" },
   { command: "status", description: "وضعیت Worker" },
   { command: "project", description: "انتخاب پروژه و حافظه جدا" },
@@ -86,6 +88,7 @@ async function handleMessage(chatId: number, text: string, env: Env): Promise<vo
   if (text === "/status") return sendTelegram(chatId, `✅ فعال\nریپو: ${env.GITHUB_REPO}\nشاخه: ${env.GITHUB_DEFAULT_BRANCH}\nمدل: ${env.AI_MODEL ?? "پیش‌فرض"}`, env);
   if (text === "/repo") return showRepo(chatId, env);
   if (text.startsWith("/repo ")) return saveRepo(chatId, text.slice(6).trim(), env);
+  if (text === "/repos") return listRepositories(chatId, env);
   if (text === "/project") return sendTelegram(chatId, "نام پروژه را بعد از /project بنویسید.\nمثال: /project ربات تلگرام", env);
   if (text.startsWith("/project ")) return switchProject(chatId, text.slice(9).trim(), env);
   if (text === "/remember") return sendTelegram(chatId, "نکته یا ترجیح را بعد از /remember بنویسید.", env);
@@ -136,6 +139,21 @@ async function showRepo(chatId: number, env: Env): Promise<void> {
   const state = env.BOT_STATE.get(env.BOT_STATE.idFromName(String(chatId)));
   const data = await (await state.fetch("https://bot-state/repo")).json() as { repo?: string };
   return sendTelegram(chatId, `ریپوزیتوری متصل: ${data.repo ?? env.GITHUB_REPO}\n\nبرای ذخیره ریپو: /repo owner/name\nبرای پاک‌کردن ریپوی ذخیره‌شده: /clear`, env);
+}
+
+async function listRepositories(chatId: number, env: Env): Promise<void> {
+  await sendTelegram(chatId, "⏳ در حال دریافت فهرست ریپوهای GitHub...", env);
+  const repositories: GithubRepo[] = [];
+  for (let page = 1; page <= 5; page++) {
+    const batch = await github(`/user/repos?per_page=100&page=${page}&sort=updated&direction=desc`, env) as GithubRepo[];
+    repositories.push(...batch);
+    if (batch.length < 100) break;
+  }
+  if (!repositories.length) return sendTelegram(chatId, "هیچ ریپویی با این GitHub Token پیدا نشد.", env);
+  const lines = repositories.map((repo, index) => `${index + 1}. ${repo.private ? "🔒 خصوصی" : "🌐 عمومی"} ${repo.full_name}${repo.archived ? " (archived)" : ""}\n${repo.html_url}`);
+  const chunks: string[] = [];
+  for (let index = 0; index < lines.length; index += 15) chunks.push(lines.slice(index, index + 15).join("\n\n"));
+  for (let index = 0; index < chunks.length; index++) await sendTelegram(chatId, `📚 ریپوهای قابل‌دسترسی (${index + 1}/${chunks.length})\n\n${chunks[index]}`, env);
 }
 
 async function saveRepo(chatId: number, repo: string, env: Env): Promise<void> {
