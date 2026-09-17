@@ -300,13 +300,18 @@ async function editCode(chatId: number, instruction: string, env: Env): Promise<
   await sendTelegram(chatId, "⏳ در حال تحلیل درخواست و آماده‌سازی تغییر...", env);
   const memory = await readMemory(stateForChat(env, chatId));
   const activeEnv = memory.repo ? { ...env, GITHUB_REPO: memory.repo } : env;
-  const plan = await ai(activeEnv, `تو برنامه‌نویس ارشد هستی. فقط JSON معتبر برگردان با این شکل: {"path":"مسیر نسبی فایل","content":"کل محتوای جدید فایل","summary":"خلاصه فارسی"}. اگر درخواست مبهم است path را خالی بگذار. ریپو: ${activeEnv.GITHUB_REPO}. درخواست: ${instruction}`);
-  let parsed: { path?: string; content?: string; summary?: string };
-  try { parsed = JSON.parse(stripFences(plan)); } catch { return sendTelegram(chatId, `نتوانستم خروجی ساختاریافته بسازم.\n${plan.slice(0, 2500)}`, env); }
-  if (!parsed.path || typeof parsed.content !== "string") return sendTelegram(chatId, "درخواست مبهم است؛ نام دقیق فایل و تغییر موردنظر را بنویسید.", env);
-  if (!safePath(parsed.path) || parsed.content.length > Number(env.MAX_FILE_BYTES ?? 120000)) return sendTelegram(chatId, "این مسیر یا اندازه فایل مجاز نیست.", env);
-  const filePath = githubPath(parsed.path);
+  const requestedPath = extractRequestedPath(instruction);
+  if (!requestedPath) return sendTelegram(chatId, "مسیر فایل را دقیق بنویسید؛ مثال: package.json", env);
+  const filePath = githubPath(requestedPath);
   const current = await github(`/repos/${activeEnv.GITHUB_REPO}/contents/${filePath}?ref=${encodeURIComponent(activeEnv.GITHUB_DEFAULT_BRANCH)}`, activeEnv) as GithubFile;
+  const currentContent = decodeGithub(current.content);
+  const deterministic = applyDeterministicEdit(requestedPath, currentContent, instruction);
+  const plan = deterministic ? JSON.stringify({ path: requestedPath, content: deterministic.content, summary: deterministic.summary }) : await ai(activeEnv, `فقط یک JSON معتبر و بدون markdown برگردان؛ هیچ توضیحی بیرون JSON ننویس. شکل دقیق: {"path":"${requestedPath}","content":"کل محتوای کامل جدید فایل","summary":"خلاصه کوتاه فارسی"}. مسیر فایل دقیقاً باید ${requestedPath} باشد و content هرگز نباید placeholder باشد.\nمحتوای فعلی فایل:\n${currentContent.slice(0, 50000)}\nدرخواست کاربر: ${instruction}`);
+  let parsed: { path?: string; content?: string; summary?: string };
+  try { parsed = JSON.parse(extractJson(plan)); } catch { return sendTelegram(chatId, `مدل نتوانست تغییر فایل را به شکل معتبر تولید کند. محتوای فایل تغییر نکرد.\n${plan.slice(0, 1200)}`, env); }
+  if (!parsed.path || typeof parsed.content !== "string") return sendTelegram(chatId, "درخواست مبهم است؛ نام دقیق فایل و تغییر موردنظر را بنویسید.", env);
+  if (parsed.content.includes("کل محتوای جدید فایل") || parsed.path.includes("/" ) && parsed.path.startsWith(activeEnv.GITHUB_REPO)) return sendTelegram(chatId, "خروجی مدل معتبر نبود و برای جلوگیری از خراب‌شدن فایل، Commit انجام نشد.", env);
+  if (!safePath(parsed.path) || parsed.content.length > Number(env.MAX_FILE_BYTES ?? 120000)) return sendTelegram(chatId, "این مسیر یا اندازه فایل مجاز نیست.", env);
   const result = await github(`/repos/${activeEnv.GITHUB_REPO}/contents/${filePath}`, activeEnv, { method: "PUT", body: JSON.stringify({ message: `feat(bot): ${parsed.summary ?? "update requested from Telegram"}`.slice(0, 120), content: btoa(unescape(encodeURIComponent(parsed.content))), sha: current.sha, branch: activeEnv.GITHUB_DEFAULT_BRANCH }) }) as { commit?: { html_url?: string } };
   return sendTelegram(chatId, `✅ تغییر در گیت‌هاب ثبت شد.\nفایل: ${parsed.path}\n${parsed.summary ?? ""}\nCommit: ${result.commit?.html_url ?? "ثبت شد"}`, env);
 }
@@ -334,6 +339,28 @@ async function answerCallback(callbackId: string, env: Env): Promise<void> {
 function isAllowedChat(chatId: number, allow?: string): boolean { return !allow || allow.split(",").map(x => x.trim()).includes(String(chatId)); }
 function safePath(path: string): boolean { return path.length > 0 && path.length < 240 && !path.startsWith("/") && !path.includes("..") && !path.startsWith(".github/workflows/") && !path.endsWith(".env"); }
 function stripFences(value: string): string { return value.replace(/^```json\s*/i, "").replace(/```\s*$/i, "").trim(); }
+function extractJson(value: string): string {
+  const cleaned = stripFences(value);
+  const start = cleaned.indexOf("{");
+  const end = cleaned.lastIndexOf("}");
+  return start >= 0 && end > start ? cleaned.slice(start, end + 1) : cleaned;
+}
+function extractRequestedPath(instruction: string): string | undefined {
+  const match = instruction.match(/(?:فایل|file|path)\s+[`'"“]?([^`'"”\s،,]+)[`'"”]?/i) ?? instruction.match(/(?:^|\s)([\w./-]+\.(?:json|ts|tsx|js|jsx|md|yml|yaml|css|html))\b/i);
+  return match?.[1]?.replace(/^`|`$/g, "");
+}
+function applyDeterministicEdit(path: string, content: string, instruction: string): { content: string; summary: string } | undefined {
+  if (path !== "package.json") return undefined;
+  const dependency = instruction.match(/(?:نسخه|version)\s+(?:پکیج\s+)?([@\w./-]+)\s+را\s+از\s+["'`^~]?([\d.]+)["'`]?\s+به\s+["'`^~]?([\d.]+)["'`]?/i) ?? instruction.match(/([@\w./-]+)\s*["']?\^?([\d.]+)["']?\s*(?:به|to)\s*["']?\^?([\d.]+)["']?/i);
+  if (!dependency) return undefined;
+  const packageName = dependency[1];
+  const oldVersion = dependency[2];
+  const newVersion = dependency[3];
+  const versionPattern = new RegExp(`(["']${escapeRegExp(packageName)}["']\\s*:\\s*["'])\\^?${escapeRegExp(oldVersion)}(["'])`);
+  if (!versionPattern.test(content)) return undefined;
+  return { content: content.replace(versionPattern, `$1^${newVersion}$2`), summary: `نسخه ${packageName} از ${oldVersion} به ${newVersion} تغییر کرد` };
+}
+function escapeRegExp(value: string): string { return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
 function stripHtml(value: string): string { return value.replace(/<[^>]+>/g, "").replace(/&amp;/g, "&").replace(/&#x27;/g, "'").trim(); }
 function githubPath(path: string): string { return path.split("/").map(encodeURIComponent).join("/"); }
 function decodeGithub(value: string): string { const bytes = Uint8Array.from(atob(value.replace(/\s/g, "")), char => char.charCodeAt(0)); return new TextDecoder().decode(bytes); }
