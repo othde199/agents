@@ -25,6 +25,21 @@ export const AGENT_SKILLS: AgentSkill[] = [
     purpose: "اجرای چرخه حرفه‌ای تغییر کد بر اساس درخواست طبیعی کاربر",
     instructions: "درخواست را به هدف‌های قابل‌اجرا تبدیل کن؛ فایل مناسب را از فهرست واقعی انتخاب کن؛ context فایل و وابستگی‌های مرتبط را بخوان؛ کمترین تغییر لازم را بساز؛ قراردادها و سبک موجود پروژه را حفظ کن؛ خروجی را از نظر مسیر، placeholder، secret و اندازه بررسی کن؛ فقط پس از نتیجه موفق GitHub ادعای Commit کن.",
   },
+  {
+    name: "database-analyzer",
+    purpose: "تحلیل schema، migration و queryهای دیتابیس",
+    instructions: "فایل‌های schema.prisma، migration، SQL، Drizzle، Supabase و Firebase را پیدا و تحلیل کن؛ روابط، ریسک migration، index و مشکل query را با مسیر فایل گزارش کن. بدون اتصال یا مجوز صریح، داده واقعی را نخوان.",
+  },
+  {
+    name: "documentation-generator",
+    purpose: "ساخت و به‌روزرسانی مستندات پروژه",
+    instructions: "از کد و تنظیمات واقعی پروژه README، مستندات API، راهنمای نصب و متغیرهای محیطی تولید کن؛ Secret واقعی را هرگز در مستندات ننویس و تفاوت پیشنهاد با فایل Commitشده را روشن نگه دار.",
+  },
+  {
+    name: "security-auditor",
+    purpose: "ممیزی امنیتی کد و تنظیمات",
+    instructions: "Secret، تنظیمات ناامن، مسیرهای حساس، CORS، injection، XSS، مجوزهای بیش‌ازحد و dependencyهای مشکوک را بررسی کن؛ Secret را نمایش نده و برای تغییرات پرریسک ابتدا گزارش و راهکار بده.",
+  },
 ];
 
 export function skillsPrompt(): string {

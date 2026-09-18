@@ -1,4 +1,5 @@
 import { skillsPrompt, SKILL_ROUTER_INSTRUCTION, CODING_AGENT_INSTRUCTION } from "./skills";
+import { runRepositorySkill } from "./repository-skills";
 
 export interface Env {
   AI: Ai;
@@ -11,6 +12,8 @@ export interface Env {
   MAX_FILE_BYTES?: string;
   ALLOWED_CHAT_IDS?: string;
   BOT_STATE: DurableObjectNamespace;
+  SUPABASE_URL?: string;
+  SUPABASE_SERVICE_ROLE_KEY?: string;
 }
 
 type TelegramUpdate = { message?: { chat: { id: number }; text?: string; from?: { id: number } }; callback_query?: { id: string; data?: string; message?: { chat: { id: number } } } };
@@ -35,7 +38,7 @@ const QUICK_MENU = { keyboard: [
   [{ text: "⏸ توقف" }, { text: "▶️ ادامه" }]
 ], resize_keyboard: true, is_persistent: true, input_field_placeholder: "پیام یا سؤال خود را بنویسید" };
 
-const HELP = `🤖 Agent Think — نسخه Free\n\nپیام را مستقیم بفرست؛ Agent خودش تصمیم می‌گیرد آیا بررسی پروژه یا جست‌وجوی وب لازم است.\n\nدستورات اصلی:\n/ask <سؤال> — پرسش از ایجنت\n/search <عبارت> — جست‌وجوی اجباری وب\n/repos — نمایش همه ریپوهای قابل‌دسترسی GitHub\n/repo owner/name — ذخیره ریپو برای زمینه پاسخ\n/repo — نمایش ریپوی ذخیره‌شده\n/status — وضعیت Worker\n\nمدیریت حافظه:\n/project <نام> — انتخاب حافظه جدا برای پروژه\n/remember <نکته> — ذخیره ترجیح در حافظه بلندمدت\n/history <عبارت> — جست‌وجو در تاریخچه مکالمه\n/clear-memory — پاک‌کردن حافظه پروژه فعال\n/clear — پاک‌کردن ریپوی ذخیره‌شده؛ ریپوزیتوری GitHub حذف نمی‌شود\n\nکنترل ربات:\n/stop — توقف پاسخ‌گویی\n/resume — ادامه فعالیت\n/help — نمایش این راهنما\n\nبرای تغییر کد، از /edit <درخواست> استفاده کنید.`;
+const HELP = `🤖 Agent Think — نسخه Free\n\nپیام را مستقیم بفرست؛ Agent خودش تصمیم می‌گیرد آیا بررسی پروژه یا جست‌وجوی وب لازم است.\n\nدستورات اصلی:\n/ask <سؤال> — پرسش از ایجنت\n/search <عبارت> — جست‌وجوی اجباری وب\n/repos — نمایش همه ریپوهای قابل‌دسترسی GitHub\n/repo owner/name — ذخیره ریپو برای زمینه پاسخ\n/repo — نمایش ریپوی ذخیره‌شده\n/analyze-db — تحلیل schema و migration دیتابیس\n/docs — تحلیل و پیشنهاد مستندات پروژه\n/security — ممیزی امنیتی پروژه\n/status — وضعیت Worker\n\nمدیریت حافظه:\n/project <نام> — انتخاب حافظه جدا برای پروژه\n/remember <نکته> — ذخیره ترجیح در حافظه بلندمدت\n/history <عبارت> — جست‌وجو در تاریخچه مکالمه\n/clear-memory — پاک‌کردن حافظه پروژه فعال\n/clear — پاک‌کردن ریپوی ذخیره‌شده؛ ریپوزیتوری GitHub حذف نمی‌شود\n\nکنترل ربات:\n/stop — توقف پاسخ‌گویی\n/resume — ادامه فعالیت\n/help — نمایش این راهنما\n\nبرای تغییر کد، از /edit <درخواست> استفاده کنید.`;
 
 const TELEGRAM_COMMANDS = [
   { command: "start", description: "شروع و نمایش راهنما" },
@@ -53,6 +56,9 @@ const TELEGRAM_COMMANDS = [
   { command: "stop", description: "توقف پاسخ‌گویی" },
   { command: "resume", description: "ادامه فعالیت" },
   { command: "edit", description: "درخواست تغییر کد" }
+  ,{ command: "analyze_db", description: "تحلیل دیتابیس" }
+  ,{ command: "docs", description: "تحلیل مستندات" }
+  ,{ command: "security", description: "ممیزی امنیتی" }
 ];
 
 export default {
@@ -135,6 +141,9 @@ async function handleMessage(chatId: number, text: string, env: Env): Promise<vo
   if (text === "/repo") return showRepo(chatId, env);
   if (text.startsWith("/repo ")) return saveRepo(chatId, text.slice(6).trim(), env);
   if (text === "/repos") return listRepositories(chatId, env);
+  if (text === "/analyze-db" || text === "/analyze_db") return analyzeRepositorySkill(chatId, "database-analyzer", env);
+  if (text === "/docs") return analyzeRepositorySkill(chatId, "documentation-generator", env);
+  if (text === "/security") return analyzeRepositorySkill(chatId, "security-auditor", env);
   if (text === "/project") return sendTelegram(chatId, "نام پروژه را بعد از /project بنویسید.\nمثال: /project ربات تلگرام", env);
   if (text.startsWith("/project ")) return switchProject(chatId, text.slice(9).trim(), env);
   if (text === "/remember") return sendTelegram(chatId, "نکته یا ترجیح را بعد از /remember بنویسید.", env);
@@ -622,3 +631,14 @@ export class BotState {
 
 function emptyProject(): ProjectMemory { return { history: [], summary: "", preferences: [] }; }
 function cleanProjectName(value: string): string { return value.trim().replace(/[^\p{L}\p{N}_ -]/gu, "").slice(0, 60) || "default"; }
+
+
+async function analyzeRepositorySkill(chatId: number, skill: "database-analyzer" | "documentation-generator" | "security-auditor", env: Env): Promise<void> {
+  await sendTelegram(chatId, "⏳ در حال خواندن فایل‌های واقعی ریپو و اجرای تحلیل...", env);
+  const memory = await readMemory(stateForChat(env, chatId));
+  const repoEnv = await resolveRepoEnv(memory.repo ? { ...env, GITHUB_REPO: memory.repo } : env);
+  const context = await runRepositorySkill(skill, repoEnv);
+  const instruction = skill === "database-analyzer" ? "schema، migration، رابطه جدول‌ها، index، ریسک امنیتی و queryهای مسئله‌دار را با مسیر فایل و شدت گزارش کن." : skill === "documentation-generator" ? "وضعیت README و مستندات API و راه‌اندازی را بررسی کن و تغییرات دقیق پیشنهادی با مسیر فایل ارائه بده؛ هنوز Commit نکن." : "ممیزی امنیتی انجام بده؛ Secret را نمایش نده، شدت هر مورد را بنویس و راهکار اصلاح را با مسیر فایل ارائه کن؛ هنوز Commit نکن.";
+  const answer = await ai(repoEnv, `${SKILL_ROUTER_INSTRUCTION}\nSkill فعال: ${skill}\n${instruction}\n${context}\nپاسخ را فارسی، مستند و فقط مبتنی بر شواهد واقعی بده.`);
+  await sendTelegram(chatId, answer, env);
+}
