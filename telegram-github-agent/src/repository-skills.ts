@@ -13,9 +13,10 @@ export async function runRepositorySkill(skill: "database-analyzer" | "documenta
 }
 
 async function supabaseContext(env: Env): Promise<string> {
-  if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) return "SUPABASE: متصل نیست؛ فقط فایل‌های schema و migration تحلیل شدند.";
+  const key = env.SUPABASE_ANON_KEY || env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!env.SUPABASE_URL || !key) return "SUPABASE: متصل نیست؛ فقط فایل‌های schema و migration تحلیل شدند.";
   try {
-    const response = await fetch(`${env.SUPABASE_URL.replace(/\/$/, "")}/rest/v1/`, { headers: { apikey: env.SUPABASE_SERVICE_ROLE_KEY, Authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}` } });
+    const response = await fetch(`${env.SUPABASE_URL.replace(/\/$/, "")}/rest/v1/`, { headers: { apikey: key, Authorization: `Bearer ${key}` } });
     return response.ok ? "SUPABASE: اتصال برقرار شد؛ metadata endpoint در دسترس است. داده‌های رکوردی خوانده نشد." : `SUPABASE: اتصال ناموفق HTTP ${response.status}`;
   } catch { return "SUPABASE: اتصال ناموفق بود؛ تحلیل فایل‌های ریپو ادامه یافت."; }
 }

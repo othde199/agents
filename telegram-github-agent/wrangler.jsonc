@@ -13,6 +13,8 @@
     "GITHUB_REPO": "othde199/agents",
     "GITHUB_DEFAULT_BRANCH": "main",
     "AI_MODEL": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
-    "MAX_FILE_BYTES": "120000"
+    "MAX_FILE_BYTES": "120000",
+    "SUPABASE_URL": "https://xgwjtvzfyvfdvioquvtf.supabase.co",
+    "SUPABASE_ANON_KEY": "sb_publishable_ppp7w-rX3F3hsJMbC7_YcA_zhFcWy8d"
   }
 }

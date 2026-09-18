@@ -19,13 +19,14 @@
 | `TELEGRAM_BOT_TOKEN` | توکن BotFather | فقط secret |
 | `TELEGRAM_WEBHOOK_SECRET` | یک رشته تصادفی حداقل 32 کاراکتری | فقط secret |
 | `GITHUB_TOKEN` | Fine-grained PAT | فقط secret؛ فقط ریپوی هدف |
-| `SUPABASE_SERVICE_ROLE_KEY` | کلید Service Role پروژه Supabase | اختیاری؛ فقط Encrypted secret |
+| `SUPABASE_ANON_KEY` | کلید Publishable پروژه Supabase | برای تحلیل read-only؛ قابل‌استفاده به‌عنوان Variable |
+| `SUPABASE_SERVICE_ROLE_KEY` | کلید Service Role پروژه Supabase | اختیاری؛ فقط برای عملیات مدیریتی و Encrypted secret |
 
-متغیرهای غیرحساس داخل `wrangler.jsonc` هستند: `GITHUB_REPO`، `GITHUB_DEFAULT_BRANCH`، `AI_MODEL` و `MAX_FILE_BYTES`. برای اتصال Supabase، `SUPABASE_URL` را به‌صورت Variable و `SUPABASE_SERVICE_ROLE_KEY` را فقط به‌صورت Encrypted secret اضافه کنید.
+متغیرهای غیرحساس داخل `wrangler.jsonc` هستند: `GITHUB_REPO`، `GITHUB_DEFAULT_BRANCH`، `AI_MODEL` و `MAX_FILE_BYTES`. برای تحلیل read-only، `SUPABASE_URL` و `SUPABASE_ANON_KEY` کافی هستند. `SUPABASE_SERVICE_ROLE_KEY` برای این نسخه لازم نیست.
 
 ## Skillهای تحلیلی
 
-فرمان `/analyze-db` فایل‌های schema، migration و SQL را تحلیل می‌کند. اگر `SUPABASE_URL` و `SUPABASE_SERVICE_ROLE_KEY` تنظیم شده باشند، اتصال پایه به Supabase را نیز بررسی می‌کند؛ این نسخه داده‌های رکوردی را نمی‌خواند. بدون Secretهای Supabase، تحلیل فایل‌های ریپو همچنان فعال است.
+فرمان `/analyze-db` فایل‌های schema، migration و SQL را تحلیل می‌کند. اگر `SUPABASE_URL` و `SUPABASE_ANON_KEY` تنظیم شده باشند، اتصال read-only پایه به Supabase را نیز بررسی می‌کند؛ این نسخه داده‌های رکوردی را نمی‌خواند. بدون تنظیمات Supabase، تحلیل فایل‌های ریپو همچنان فعال است.
 
 فرمان `/docs` وضعیت README، مستندات API و راه‌اندازی را بررسی می‌کند و `/security` ممیزی امنیتی کد و تنظیمات را انجام می‌دهد. این دو فرمان فقط گزارش می‌دهند و خودکار Commit نمی‌کنند. برای اعمال پیشنهادها از `/edit` استفاده کنید.
 

@@ -13,6 +13,7 @@ export interface Env {
   ALLOWED_CHAT_IDS?: string;
   BOT_STATE: DurableObjectNamespace;
   SUPABASE_URL?: string;
+  SUPABASE_ANON_KEY?: string;
   SUPABASE_SERVICE_ROLE_KEY?: string;
 }
 
