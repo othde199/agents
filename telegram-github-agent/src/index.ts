@@ -171,6 +171,7 @@ async function handleMessage(chatId: number, text: string, env: Env): Promise<vo
   if (text.startsWith("/ask ")) return agentReply(chatId, text.slice(5).trim(), env);
   if (text === "/edit") return sendTelegram(chatId, "درخواست تغییر را بعد از /edit بنویسید.", env);
   if (text.startsWith("/edit ")) return editCode(chatId, text.slice(6).trim(), env);
+  if (await routeNaturalMessage(chatId, text, env)) return;
   if (looksLikeEditRequest(text)) return editCode(chatId, text, env);
   return agentReply(chatId, text, env);
 }
@@ -206,6 +207,48 @@ async function agentReply(chatId: number, question: string, env: Env): Promise<v
   await appendMemory(state, { role: "user", content: question }, { role: "assistant", content: answer });
   const sources = [...toolResult.context.matchAll(/(?:URL|SOURCE):\s*(https?:\/\/[^\s]+)/g)].map(match => match[1]).slice(0, 5);
   return sendTelegram(chatId, sources.length ? `${answer}\n\nمنابع بررسی‌شده:\n${sources.join("\n")}` : answer, env);
+}
+
+type NaturalIntent = "answer" | "web_search" | "edit" | "repo_analysis" | "trace" | "run_checks";
+
+/** Selects an existing safe handler; it never edits GitHub or invents tool output. */
+async function routeNaturalMessage(chatId: number, text: string, env: Env): Promise<boolean> {
+  if (text.length < 2 || /^(سلام|درود|hello|hi|hey|خوبی|مرسی|ممنون)[!؟? .،]*$/iu.test(text)) return false;
+  const state = stateForChat(env, chatId);
+  const memory = await readMemory(state);
+  let intent: NaturalIntent = "answer";
+  let query = text;
+  try {
+    const result = await env.AI.run(env.AI_MODEL ?? "@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
+      messages: [
+        { role: "system", content: `تو مدیر نیت یک ایجنت تلگرامی هستی. پیام را به یکی از intentهای زیر دسته‌بندی کن و فقط JSON معتبر در یک خط بده:
+{"intent":"answer|web_search|edit|repo_analysis|trace|run_checks","query":"متن کامل کاربر"}
+قواعد: answer برای گفت‌وگوی عادی و مفاهیم پایدار؛ web_search برای آخرین، امروز، قیمت، خبر، نسخه فعلی، URL یا سایت؛ edit برای هر درخواست اصلاح، اضافه، حذف، rename یا commit کد، حتی بدون مسیر فایل؛ repo_analysis برای بررسی ساختار، معماری، کیفیت، باگ، دیتابیس، مستندات یا پیشنهاد بهبود بدون اعمال تغییر؛ trace برای مسیر اجرا، import و وابستگی؛ run_checks برای test، build، lint یا CI. اگر سؤال و تغییر هر دو وجود دارد edit را انتخاب کن. بر اساس معنای همین پیام تصمیم بگیر و از موضوعات نمونه حدس نزن.
+پروژه: ${memory.activeProject} | ریپو: ${memory.repo ?? env.GITHUB_REPO}` },
+        ...memory.project.history.slice(-4),
+        { role: "user", content: text }
+      ],
+      max_tokens: 180,
+      temperature: 0
+    }) as { response?: unknown; result?: { response?: unknown } };
+    const raw = typeof result.response === "string" ? result.response : typeof result.result?.response === "string" ? result.result.response : "";
+    const parsed = JSON.parse(extractJson(raw)) as { intent?: NaturalIntent; query?: string };
+    if (["answer", "web_search", "edit", "repo_analysis", "trace", "run_checks"].includes(parsed.intent ?? "")) intent = parsed.intent as NaturalIntent;
+    if (parsed.query?.trim()) query = parsed.query.trim();
+  } catch {
+    if (looksLikeEditRequest(text)) intent = "edit";
+    else if (needsWeb(text)) intent = "web_search";
+    else if (/trace|ردیاب|مسیر اجرا|وابستگ|import|flow/i.test(text)) intent = "trace";
+    else if (/test|تست|build|بیلد|lint|workflow|بررسی اجرا/i.test(text)) intent = "run_checks";
+    else if (needsRepo(text)) intent = "repo_analysis";
+  }
+  if (intent === "answer") return false;
+  if (intent === "edit") { await editCode(chatId, text, env); return true; }
+  if (intent === "web_search") { await forcedWebSearch(chatId, query, env); return true; }
+  if (intent === "trace") { await traceCode(chatId, query, env); return true; }
+  if (intent === "run_checks") { await runRepositoryChecks(chatId, env); return true; }
+  await agentReply(chatId, query, env);
+  return true;
 }
 
 async function aiWithSearchTool(env: Env, prompt: string, userQuestion: string, history: ConversationMessage[] = []): Promise<{ answer: string; context: string }> {
