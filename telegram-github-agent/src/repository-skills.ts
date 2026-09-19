@@ -16,8 +16,11 @@ async function supabaseContext(env: Env): Promise<string> {
   const key = env.SUPABASE_ANON_KEY || env.SUPABASE_SERVICE_ROLE_KEY;
   if (!env.SUPABASE_URL || !key) return "SUPABASE: متصل نیست؛ فقط فایل‌های schema و migration تحلیل شدند.";
   try {
-    const response = await fetch(`${env.SUPABASE_URL.replace(/\/$/, "")}/rest/v1/`, { headers: { apikey: key, Authorization: `Bearer ${key}` } });
-    return response.ok ? "SUPABASE: اتصال برقرار شد؛ metadata endpoint در دسترس است. داده‌های رکوردی خوانده نشد." : `SUPABASE: اتصال ناموفق HTTP ${response.status}`;
+    const base = env.SUPABASE_URL.replace(/\/$/, "");
+    const response = await fetch(`${base}/rest/v1/`, { headers: { apikey: key, Authorization: `Bearer ${key}` } });
+    if (response.ok) return "SUPABASE: endpoint عمومی REST در دسترس است؛ داده‌های رکوردی خوانده نشد.";
+    if (response.status === 401 || response.status === 403) return "SUPABASE: URL پروژه و endpoint قابل دسترسی است، اما endpoint عمومی REST برای metadata با کلید فعلی مجوز نمی‌دهد؛ تحلیل فقط بر اساس schema و migrationهای ریپو انجام شد و این وضعیت مانع تحلیل کد نیست.";
+    return `SUPABASE: پاسخ endpoint بررسی اتصال HTTP ${response.status} بود؛ تحلیل فایل‌های ریپو ادامه یافت.`;
   } catch { return "SUPABASE: اتصال ناموفق بود؛ تحلیل فایل‌های ریپو ادامه یافت."; }
 }
 
