@@ -216,9 +216,10 @@ async function routeNaturalMessage(chatId: number, text: string, env: Env): Prom
   if (text.length < 2 || /^(سلام|درود|hello|hi|hey|خوبی|مرسی|ممنون)[!؟? .،]*$/iu.test(text)) return false;
   const state = stateForChat(env, chatId);
   const memory = await readMemory(state);
-  let intent: NaturalIntent = "answer";
+  let intent: NaturalIntent = deterministicNaturalIntent(text) ?? "answer";
   let query = text;
   try {
+    if (intent !== "answer") throw new Error("deterministic intent");
     const result = await env.AI.run(env.AI_MODEL ?? "@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
       messages: [
         { role: "system", content: `تو مدیر نیت یک ایجنت تلگرامی هستی. پیام را به یکی از intentهای زیر دسته‌بندی کن و فقط JSON معتبر در یک خط بده:
@@ -236,11 +237,13 @@ async function routeNaturalMessage(chatId: number, text: string, env: Env): Prom
     if (["answer", "web_search", "edit", "repo_analysis", "trace", "run_checks"].includes(parsed.intent ?? "")) intent = parsed.intent as NaturalIntent;
     if (parsed.query?.trim()) query = parsed.query.trim();
   } catch {
-    if (looksLikeEditRequest(text)) intent = "edit";
-    else if (needsWeb(text)) intent = "web_search";
-    else if (/trace|ردیاب|مسیر اجرا|وابستگ|import|flow/i.test(text)) intent = "trace";
-    else if (/test|تست|build|بیلد|lint|workflow|بررسی اجرا/i.test(text)) intent = "run_checks";
-    else if (needsRepo(text)) intent = "repo_analysis";
+    if (intent === "answer") {
+      if (looksLikeEditRequest(text)) intent = "edit";
+      else if (needsWeb(text)) intent = "web_search";
+      else if (/trace|ردیاب|مسیر اجرا|وابستگ|import|flow/i.test(text)) intent = "trace";
+      else if (/test|تست|build|بیلد|lint|workflow|بررسی اجرا/i.test(text)) intent = "run_checks";
+      else if (needsRepo(text)) intent = "repo_analysis";
+    }
   }
   if (intent === "answer") return false;
   if (intent === "edit") { await editCode(chatId, text, env); return true; }
@@ -249,6 +252,16 @@ async function routeNaturalMessage(chatId: number, text: string, env: Env): Prom
   if (intent === "run_checks") { await runRepositoryChecks(chatId, env); return true; }
   await agentReply(chatId, query, env);
   return true;
+}
+
+function deterministicNaturalIntent(text: string): NaturalIntent | undefined {
+  const edit = /(?:تغییر|اصلاح|درست|رفع|حل|اضافه|حذف|پاک|جایگزین|تعویض|بازنویسی|پیاده|پیاده‌سازی|commit|push|برطرف|فعال).*(?:کد|پروژه|ریپو|فایل|برنامه|قابلیت|باگ|خطا|نسخه|متن|عبارت|package|code|repo|file|feature|bug|error)|(?:کد|پروژه|ریپو|فایل|برنامه).*(?:تغییر بده|اصلاح کن|درست کن|رفع کن|اضافه کن|حذف کن|جایگزین کن|بساز|پیاده کن|برطرف کن)/iu.test(text);
+  if (edit || looksLikeEditRequest(text)) return "edit";
+  if (/(?:trace|ردیاب|ردیابی|مسیر اجرا|جریان اجرا|وابستگی|importها?|فلو|flow)/i.test(text)) return "trace";
+  if (/(?:test|تست|build|بیلد|lint|workflow|ci|اجرا(?:ی)? تست|بررسی اجرا)/i.test(text)) return "run_checks";
+  if (/(?:بررسی|تحلیل|آنالیز|ساختار|معماری|کدها? را بخوان|سورس|ریپو|پروژه|گیت.?هاب|باگ.*پیدا|مشکل.*پیدا|بهترش|بهبود|مستندات|امنیت|دیتابیس|database|repository|codebase|github|source code)/iu.test(text)) return "repo_analysis";
+  if (needsWeb(text)) return "web_search";
+  return undefined;
 }
 
 async function aiWithSearchTool(env: Env, prompt: string, userQuestion: string, history: ConversationMessage[] = []): Promise<{ answer: string; context: string }> {
@@ -431,7 +444,7 @@ async function resolveRepoEnv(env: Env): Promise<Env> {
   } catch { return env; }
 }
 
-function needsRepo(question: string): boolean { return /پروژه|ریپو|کد|فایل|گیت.?هاب|repo|code|file|github|worker|agents|package|wrangler|typescript|javascript|ساختار/i.test(question); }
+function needsRepo(question: string): boolean { return /پروژه|ریپو|کد|فایل|گیت.?هاب|بررسی|تحلیل|آنالیز|ساختار|معماری|سورس|باگ|مشکل|بهبود|repo|code|file|github|worker|agents|package|wrangler|typescript|javascript|database|دیتابیس/i.test(question); }
 function looksLikeEditRequest(question: string): boolean { return /(?:می.?خوام|میخام|می.?خواهم|تغییر بده|عوض کن|جایگزین کن|change|replace|update|modify|set)/i.test(question) && /(?:رو\s+به|به|to|with|به‌جای|instead)/i.test(question); }
 function needsWeb(question: string): boolean { return /اینترنت|وب|سایت|صفحه|لینک|برو داخل|محتوای سایت|جست.?جو|آخرین|اخرین|جدیدترین|امروز|قیمت|خبر|ورژن|نسخه جدید|مستندات|internet|web|site|page|url|link|search|latest|today|news|price|documentation|۲۰۲|202[4-9]|https?:\/\//i.test(question); }
 
