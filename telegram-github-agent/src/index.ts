@@ -50,6 +50,7 @@ const TELEGRAM_COMMANDS = [
   { command: "search", description: "جست‌وجوی اجباری وب" },
   { command: "repos", description: "نمایش همه ریپوهای GitHub" },
   { command: "repo", description: "نمایش یا ذخیره ریپو" },
+  { command: "source", description: "دریافت سورس کامل ریپو به‌صورت ZIP" },
   { command: "status", description: "وضعیت Worker" },
   { command: "project", description: "انتخاب پروژه و حافظه جدا" },
   { command: "remember", description: "ذخیره ترجیح در حافظه" },
@@ -147,6 +148,10 @@ async function handleMessage(chatId: number, text: string, env: Env): Promise<vo
   if (text === "/status") return showStatus(chatId, env);
   if (text === "/repo") return showRepo(chatId, env);
   if (text.startsWith("/repo ")) return saveRepo(chatId, text.slice(6).trim(), env);
+  if (text === "/source" || text === "/zip") return downloadRepository(chatId, undefined, env);
+  if (text.startsWith("/source ") || text.startsWith("/zip ")) return downloadRepository(chatId, text.replace(/^\/(?:source|zip)\s+/i, "").trim(), env);
+  const sourceRepo = extractGithubRepo(text);
+  if (sourceRepo && isSourceDownloadRequest(text, sourceRepo)) return downloadRepository(chatId, sourceRepo, env);
   if (text === "/repos") return listRepositories(chatId, env);
   if (text === "/analyze-db" || text === "/analyze_db") return analyzeRepositorySkill(chatId, "database-analyzer", env);
   if (text === "/docs") return analyzeRepositorySkill(chatId, "documentation-generator", env);
@@ -317,6 +322,41 @@ async function showRepo(chatId: number, env: Env): Promise<void> {
   const state = env.BOT_STATE.get(env.BOT_STATE.idFromName(String(chatId)));
   const data = await (await state.fetch("https://bot-state/repo")).json() as { repo?: string };
   return sendTelegram(chatId, `ریپوزیتوری متصل: ${data.repo ?? env.GITHUB_REPO}\n\nبرای ذخیره ریپو: /repo owner/name\nبرای پاک‌کردن ریپوی ذخیره‌شده: /clear`, env);
+}
+
+async function downloadRepository(chatId: number, requestedRepo: string | undefined, env: Env): Promise<void> {
+  const memory = await readMemory(stateForChat(env, chatId));
+  const repo = extractGithubRepo(requestedRepo ?? memory.repo ?? env.GITHUB_REPO);
+  if (!repo) return sendTelegram(chatId, "لینک یا نام ریپو معتبر نیست.\nمثال: /source https://github.com/owner/repository", env);
+  await sendTelegram(chatId, `⏳ در حال دریافت سورس کامل ${repo} به‌صورت ZIP...`, env);
+  const activeEnv = { ...env, GITHUB_REPO: repo };
+  const details = await github(`/repos/${repo}`, activeEnv) as GithubRepoDetails;
+  const branch = details.default_branch || env.GITHUB_DEFAULT_BRANCH || "main";
+  const response = await fetch(`https://api.github.com/repos/${repo}/zipball/${encodeURIComponent(branch)}`, { headers: { Accept: "application/vnd.github+json", Authorization: `Bearer ${env.GITHUB_TOKEN}`, "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "telegram-github-agent" }, redirect: "follow" });
+  if (!response.ok) throw new Error(`دریافت ZIP از GitHub ناموفق بود: HTTP ${response.status}`);
+  const maxBytes = 49 * 1024 * 1024;
+  const size = Number(response.headers.get("content-length") ?? 0);
+  if (size > maxBytes) return sendTelegram(chatId, "حجم ZIP بیشتر از سقف تقریبی Telegram است.", env);
+  const archive = await response.arrayBuffer();
+  if (archive.byteLength > maxBytes) return sendTelegram(chatId, "حجم ZIP بیشتر از سقف تقریبی Telegram است و ارسال نشد.", env);
+  const filename = `${repo.replace("/", "-")}-${branch.replace(/[^A-Za-z0-9_.-]/g, "-")}.zip`;
+  const form = new FormData();
+  form.append("chat_id", String(chatId));
+  form.append("caption", `📦 سورس کامل ${repo}\nشاخه: ${branch}`);
+  form.append("document", new File([archive], filename, { type: "application/zip" }));
+  const telegram = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendDocument`, { method: "POST", body: form });
+  if (!telegram.ok) throw new Error(`ارسال فایل به Telegram ناموفق بود: HTTP ${telegram.status}`);
+}
+
+function extractGithubRepo(value: string): string | undefined {
+  const text = value.trim().replace(/[<>()[\]{}،,؛;]+$/g, "");
+  const url = text.match(/(?:https?:\/\/)?(?:www\.)?github\.com\/([^\s/]+)\/([^\s/#?]+)/i);
+  const candidate = url ? `${url[1]}/${url[2].replace(/\.git$/i, "")}` : text.match(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/)?.[0];
+  return candidate && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(candidate) ? candidate : undefined;
+}
+
+function isSourceDownloadRequest(text: string, repo: string): boolean {
+  return text.trim() === repo || /github\.com\/|(?:دانلود|دریافت|ارسال|بفرست|زیپ|zip|سورس کامل|کل سورس|source)/iu.test(text);
 }
 
 async function showStatus(chatId: number, env: Env): Promise<void> {
