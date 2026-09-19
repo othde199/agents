@@ -37,7 +37,8 @@
 یک **Fine-grained personal access token** بسازید، آن را فقط به `othde199/agents` یا ریپوی موردنظر محدود کنید و حداقل مجوزها را بدهید:
 
 - `Contents: Read and write`
-- برای نسخه فعلی ربات نیازی به Issues، Actions، Secrets یا Administration نیست.
+- برای `/run-tests`، مجوز `Actions: Read and write` نیز لازم است؛ اگر این فرمان را استفاده نمی‌کنید، این مجوز را اضافه نکنید.
+- به Issues، Secrets یا Administration نیازی نیست.
 
 توکن را در کد، `wrangler.jsonc` یا چت تلگرام قرار ندهید.
 
@@ -74,8 +75,12 @@ curl -X POST "https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/setWebhook" \
 - `/analyze-db`
 - `/docs`
 - `/security`
+- `/index-project` برای خواندن فایل‌های واقعی و ساخت ایندکس محلی در Durable Object
+- `/search-code عبارت` برای جست‌وجوی رتبه‌بندی‌شده در مسیر، symbol، import و قطعه‌کد
+- `/trace درخواست` برای trace استاتیک مسیرهای مرتبط و وابستگی‌های import
+- `/run-tests` برای dispatch کردن Workflow `agent-check.yml` در GitHub
 
-در نسخه فعلی `/edit` مستقیماً یک فایل موجود را با commit روی شاخه پیش‌فرض به‌روزرسانی می‌کند. برای محیط حساس، بهتر است در گام بعدی ساخت branch و Pull Request، تأیید دو مرحله‌ای و تست قبل از merge اضافه شود.
+در نسخه فعلی `/edit` مستقیماً یک فایل موجود را با commit روی شاخه پیش‌فرض به‌روزرسانی می‌کند. `/trace` تحلیل static است و runtime را اجرا نمی‌کند. `/run-tests` نیز اجرای کد را داخل Cloudflare انجام نمی‌دهد؛ فقط Workflow موجود در ریپو را از طریق GitHub Actions فراخوانی می‌کند. فایل `.github/workflows/agent-check.yml` نمونه‌ای رایگان برای build، test، typecheck و audit است و باید در ریپوی هدف نیز وجود داشته باشد.
 
 ## نکات امنیتی مهم
 

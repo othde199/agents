@@ -1,0 +1,41 @@
+name: Agent checks
+
+on:
+  workflow_dispatch:
+    inputs:
+      requested_by:
+        description: Request source
+        required: false
+        default: telegram-agent
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Enable pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+      - name: Typecheck when available
+        run: pnpm run typecheck --if-present
+      - name: Test when available
+        run: pnpm test --if-present
+      - name: Build when available
+        run: pnpm run build --if-present
+      - name: Dependency audit
+        run: pnpm audit --audit-level=high || true

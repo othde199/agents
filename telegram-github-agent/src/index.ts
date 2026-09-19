@@ -1,5 +1,6 @@
 import { skillsPrompt, SKILL_ROUTER_INSTRUCTION, CODING_AGENT_INSTRUCTION } from "./skills";
 import { runRepositorySkill } from "./repository-skills";
+import { buildRepositoryIndex, searchIndexedCode, traceIndexedCode, type RepositoryIndex } from "./repo-intelligence";
 
 export interface Env {
   AI: Ai;
@@ -8,6 +9,7 @@ export interface Env {
   GITHUB_TOKEN: string;
   GITHUB_REPO: string;
   GITHUB_DEFAULT_BRANCH: string;
+  GITHUB_CHECK_WORKFLOW?: string;
   AI_MODEL?: string;
   MAX_FILE_BYTES?: string;
   ALLOWED_CHAT_IDS?: string;
@@ -60,6 +62,10 @@ const TELEGRAM_COMMANDS = [
   ,{ command: "analyze_db", description: "تحلیل دیتابیس" }
   ,{ command: "docs", description: "تحلیل مستندات" }
   ,{ command: "security", description: "ممیزی امنیتی" }
+  ,{ command: "index_project", description: "ایندکس کد پروژه" }
+  ,{ command: "search_code", description: "جست‌وجو در کد" }
+  ,{ command: "trace", description: "ردیابی مسیر اجرای کد" }
+  ,{ command: "run_tests", description: "اجرای تست و build در GitHub" }
 ];
 
 export default {
@@ -145,6 +151,12 @@ async function handleMessage(chatId: number, text: string, env: Env): Promise<vo
   if (text === "/analyze-db" || text === "/analyze_db") return analyzeRepositorySkill(chatId, "database-analyzer", env);
   if (text === "/docs") return analyzeRepositorySkill(chatId, "documentation-generator", env);
   if (text === "/security") return analyzeRepositorySkill(chatId, "security-auditor", env);
+  if (text === "/index-project" || text === "/index_project") return indexProject(chatId, env);
+  if (text === "/search-code" || text === "/search_code") return sendTelegram(chatId, "عبارت جست‌وجو را بعد از /search-code بنویسید.", env);
+  if (text.startsWith("/search-code ") || text.startsWith("/search_code ")) return searchCode(chatId, text.replace(/^\/search[-_]code\s+/i, "").trim(), env);
+  if (text === "/trace") return sendTelegram(chatId, "درخواست trace را بعد از /trace بنویسید.", env);
+  if (text.startsWith("/trace ")) return traceCode(chatId, text.slice(7).trim(), env);
+  if (text === "/run-tests" || text === "/run_tests") return runRepositoryChecks(chatId, env);
   if (text === "/project") return sendTelegram(chatId, "نام پروژه را بعد از /project بنویسید.\nمثال: /project ربات تلگرام", env);
   if (text.startsWith("/project ")) return switchProject(chatId, text.slice(9).trim(), env);
   if (text === "/remember") return sendTelegram(chatId, "نکته یا ترجیح را بعد از /remember بنویسید.", env);
@@ -296,6 +308,55 @@ async function forcedWebSearch(chatId: number, query: string, env: Env): Promise
   const results = await webSearch(query);
   const answer = await ai(env, `با استفاده از نتایج جست‌وجوی زیر، به فارسی دقیق پاسخ بده. اگر نتیجه کافی نیست صادقانه بگو.\n${results}\nسؤال: ${query}`);
   return sendTelegram(chatId, answer, env);
+}
+
+async function indexProject(chatId: number, env: Env): Promise<void> {
+  await sendTelegram(chatId, "⏳ در حال خواندن فایل‌های واقعی و ساخت ایندکس پروژه...", env);
+  const memory = await readMemory(stateForChat(env, chatId));
+  const repoEnv = await resolveRepoEnv(memory.repo ? { ...env, GITHUB_REPO: memory.repo } : env);
+  const index = await buildRepositoryIndex(repoEnv, repoEnv.GITHUB_DEFAULT_BRANCH);
+  await stateForChat(env, chatId).fetch("https://bot-state/repo-index", { method: "POST", body: JSON.stringify(index) });
+  return sendTelegram(chatId, `✅ ایندکس پروژه ساخته شد.\nریپو: ${index.repo}\nفایل‌های تحلیل‌شده: ${index.files.length}\nزمان: ${index.generatedAt}\n\nحالا می‌توانید از /search-code یا /trace استفاده کنید.`, env);
+}
+
+async function loadRepositoryIndex(chatId: number, env: Env): Promise<{ index?: RepositoryIndex; repoEnv: Env }> {
+  const memory = await readMemory(stateForChat(env, chatId));
+  const repoEnv = await resolveRepoEnv(memory.repo ? { ...env, GITHUB_REPO: memory.repo } : env);
+  const response = await stateForChat(env, chatId).fetch("https://bot-state/repo-index");
+  const data = await response.json() as { index?: RepositoryIndex };
+  if (data.index?.repo === repoEnv.GITHUB_REPO && data.index.branch === repoEnv.GITHUB_DEFAULT_BRANCH) return { index: data.index, repoEnv };
+  const index = await buildRepositoryIndex(repoEnv, repoEnv.GITHUB_DEFAULT_BRANCH);
+  await stateForChat(env, chatId).fetch("https://bot-state/repo-index", { method: "POST", body: JSON.stringify(index) });
+  return { index, repoEnv };
+}
+
+async function searchCode(chatId: number, query: string, env: Env): Promise<void> {
+  if (!query) return sendTelegram(chatId, "عبارت جست‌وجو خالی است.", env);
+  await sendTelegram(chatId, "🔎 در حال جست‌وجوی کدهای ایندکس‌شده...", env);
+  const { index, repoEnv } = await loadRepositoryIndex(chatId, env);
+  if (!index) return sendTelegram(chatId, "ایندکس پروژه ساخته نشد.", env);
+  const evidence = searchIndexedCode(index, query);
+  const answer = await ai(repoEnv, `${SKILL_ROUTER_INSTRUCTION}\n${evidence}\n\nسؤال کاربر: ${query}\nپاسخ فارسی را فقط بر اساس شواهد مسیرها و قطعه‌کدها بده. اگر شواهد کافی نیست صادقانه بگو.`, []);
+  return sendTelegram(chatId, answer, env);
+}
+
+async function traceCode(chatId: number, question: string, env: Env): Promise<void> {
+  if (!question) return sendTelegram(chatId, "درخواست trace خالی است.", env);
+  await sendTelegram(chatId, "🧭 در حال trace استاتیک وابستگی‌ها و importها...", env);
+  const { index, repoEnv } = await loadRepositoryIndex(chatId, env);
+  if (!index) return sendTelegram(chatId, "ایندکس پروژه ساخته نشد.", env);
+  const evidence = traceIndexedCode(index, question);
+  const answer = await ai(repoEnv, `${SKILL_ROUTER_INSTRUCTION}\n${evidence}\n\nدرخواست کاربر: ${question}\nگزارش فارسی بده، مسیرهای واقعی را حفظ کن و صریحاً بگو این تحلیل static است و اجرای runtime نیست.`, []);
+  return sendTelegram(chatId, answer, env);
+}
+
+async function runRepositoryChecks(chatId: number, env: Env): Promise<void> {
+  const memory = await readMemory(stateForChat(env, chatId));
+  const repoEnv = memory.repo ? { ...env, GITHUB_REPO: memory.repo } : env;
+  const workflow = env.GITHUB_CHECK_WORKFLOW ?? "agent-check.yml";
+  await sendTelegram(chatId, `⏳ درخواست اجرای build/test در GitHub ارسال شد. Workflow: ${workflow}`, env);
+  await github(`/repos/${repoEnv.GITHUB_REPO}/actions/workflows/${encodeURIComponent(workflow)}/dispatches`, repoEnv, { method: "POST", body: JSON.stringify({ ref: repoEnv.GITHUB_DEFAULT_BRANCH, inputs: { requested_by: "telegram-agent" } }) });
+  return sendTelegram(chatId, "✅ Workflow اجرا شد. برای مشاهده نتیجه، وضعیت Actions ریپو را بررسی کنید. اجرای کد داخل Cloudflare Worker انجام نمی‌شود.", env);
 }
 
 async function switchProject(chatId: number, name: string, env: Env): Promise<void> {
@@ -496,6 +557,7 @@ async function github(path: string, env: Env, init: RequestInit = {}): Promise<u
     try { message = (JSON.parse(body) as { message?: string }).message ?? ""; } catch { /* non-JSON error */ }
     throw new Error(`GitHub API ${response.status}${message ? `: ${message}` : ""}`);
   }
+  if (response.status === 204) return {};
   return response.json();
 }
 
@@ -576,6 +638,11 @@ export class BotState {
       const body = await request.json() as { repos?: string[] };
       await this.state.storage.put("repo-options", body.repos ?? []);
     }
+    if (path === "/repo-index" && request.method === "POST") {
+      const index = await request.json() as RepositoryIndex;
+      await this.state.storage.put("repo-index", index);
+    }
+    if (path === "/repo-index" && request.method === "GET") return json({ index: await this.state.storage.get<RepositoryIndex>("repo-index") });
     if (path.startsWith("/repo-option/") && request.method === "GET") {
       const index = Number(path.slice("/repo-option/".length));
       const repos = (await this.state.storage.get<string[]>("repo-options")) ?? [];
