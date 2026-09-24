@@ -232,6 +232,7 @@ async function runAgentLoop(env: Env, chatId: number, question: string, memory: 
   ];
   const sources: string[] = [];
   let lastAnswer = "پاسخی دریافت نشد.";
+  const usedCalls = new Set<string>();
   for (let turn = 0; turn < 6; turn++) {
     const result = await env.AI.run(env.AI_MODEL ?? "@cf/meta/llama-3.3-70b-instruct-fp8-fast", { messages, tools: AGENT_TOOLS, max_tokens: 2200, temperature: 0.15 }) as { response?: unknown; tool_calls?: unknown; result?: { response?: unknown; tool_calls?: unknown } };
     const response = typeof result.response === "string" ? result.response : typeof result.result?.response === "string" ? result.result.response : "";
@@ -245,12 +246,20 @@ async function runAgentLoop(env: Env, chatId: number, question: string, memory: 
       const rawArgs = call.arguments ?? call.function?.arguments ?? {};
       let args: Record<string, unknown> = {};
       try { args = typeof rawArgs === "string" ? JSON.parse(rawArgs) as Record<string, unknown> : rawArgs as Record<string, unknown>; } catch { args = {}; }
+      const callKey = `${name}:${JSON.stringify(args)}`;
+      if (usedCalls.has(callKey)) {
+        messages.push({ role: "user", content: `ابزار ${name} با همین ورودی قبلاً اجرا شده است. از نتیجه قبلی استفاده کن و ابزار دیگری را فقط در صورت نیاز انتخاب کن.` });
+        continue;
+      }
+      usedCalls.add(callKey);
       const output = await executeAgentTool(name, args, env, chatId);
       for (const match of output.matchAll(/(?:URL|SOURCE):\s*(https?:\/\/[^\s]+)/g)) sources.push(match[1]);
       messages.push({ role: "user", content: `نتیجه ابزار ${name} برای ادامه تحلیل:\n${output.slice(0, 26000)}` });
     }
   }
-  return { answer: `${lastAnswer}\n\nبرای جلوگیری از چرخه بی‌نهایت، تعداد مراحل ابزار به سقف ۶ رسید.`, sources };
+  const final = await env.AI.run(env.AI_MODEL ?? "@cf/meta/llama-3.3-70b-instruct-fp8-fast", { messages: [...messages, { role: "user", content: "اکنون چرخه ابزار کامل شد. دیگر هیچ ابزاری صدا نزن. فقط بر اساس همه نتایج واقعی بالا، پاسخ نهایی فارسی و دقیق بده؛ اگر شواهد کافی نیست صادقانه بگو." }], max_tokens: 2200, temperature: 0.15 }) as { response?: unknown; result?: { response?: unknown } };
+  const finalResponse = typeof final.response === "string" ? final.response : typeof final.result?.response === "string" ? final.result.response : "";
+  return { answer: finalResponse.trim() || lastAnswer || "بر اساس ابزارهای اجراشده، پاسخ نهایی تولید نشد.", sources };
 }
 
 async function executeAgentTool(name: string, args: Record<string, unknown>, env: Env, chatId: number): Promise<string> {
