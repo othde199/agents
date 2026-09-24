@@ -239,7 +239,7 @@ async function runAgentLoop(env: Env, chatId: number, question: string, memory: 
     const calls = (result.tool_calls ?? result.result?.tool_calls) as unknown;
     const toolCalls = Array.isArray(calls) ? calls as AgentToolCall[] : [];
     if (!toolCalls.length) return { answer: lastAnswer, sources };
-    messages.push({ role: "assistant", content: response || null, tool_calls: toolCalls });
+    messages.push({ role: "assistant", content: response || `درخواست ابزار: ${JSON.stringify(toolCalls)}` });
     for (const call of toolCalls.slice(0, 3)) {
       const name = call.name ?? call.function?.name ?? "";
       const rawArgs = call.arguments ?? call.function?.arguments ?? {};
@@ -247,7 +247,7 @@ async function runAgentLoop(env: Env, chatId: number, question: string, memory: 
       try { args = typeof rawArgs === "string" ? JSON.parse(rawArgs) as Record<string, unknown> : rawArgs as Record<string, unknown>; } catch { args = {}; }
       const output = await executeAgentTool(name, args, env, chatId);
       for (const match of output.matchAll(/(?:URL|SOURCE):\s*(https?:\/\/[^\s]+)/g)) sources.push(match[1]);
-      messages.push({ role: "tool", tool_call_id: call.id, name, content: output.slice(0, 26000) });
+      messages.push({ role: "user", content: `نتیجه ابزار ${name} برای ادامه تحلیل:\n${output.slice(0, 26000)}` });
     }
   }
   return { answer: `${lastAnswer}\n\nبرای جلوگیری از چرخه بی‌نهایت، تعداد مراحل ابزار به سقف ۶ رسید.`, sources };
