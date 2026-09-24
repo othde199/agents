@@ -205,7 +205,7 @@ async function agentReply(chatId: number, question: string, env: Env): Promise<v
   const memory = await readMemory(state);
   const activeEnv = memory.repo ? { ...env, GITHUB_REPO: memory.repo } : env;
   const repoEnv = await resolveRepoEnv(activeEnv);
-  const repoContext = needsRepo(question) ? await projectContext(repoEnv) : "";
+  const repoContext = needsRepo(question) ? await projectContext(repoEnv, question) : "";
   const prompt = `تو یک ایجنت عمومی و دستیار برنامه‌نویسی هستی. به فارسی و دقیق جواب بده. اگر سؤال به اطلاعات زنده، آخرین نسخه، خبر، قیمت، سایت یا URL نیاز دارد از ابزار search_web استفاده کن؛ از حافظه‌ات حدس نزن. اگر ابزار نتیجه کافی نداد، صادقانه بگو اطلاعات قابل‌تأیید نیست.\n\n${SKILL_ROUTER_INSTRUCTION}\n${skillsPrompt()}\n\nریپوی زمینه: ${repoEnv.GITHUB_REPO}\nپروژه فعال: ${memory.activeProject}\nخلاصه حافظه: ${memory.project.summary}\nترجیحات کاربر: ${memory.project.preferences.join(" | ")}\n${repoContext}\nسؤال کاربر: ${question}`;
   const toolResult = await aiWithSearchTool(repoEnv, prompt, question, memory.project.history);
   const answer = toolResult.answer;
@@ -235,7 +235,8 @@ async function routeNaturalMessage(chatId: number, text: string, env: Env): Prom
         { role: "user", content: text }
       ],
       max_tokens: 180,
-      temperature: 0
+      temperature: 0,
+      response_format: { type: "json_schema", json_schema: { type: "object", properties: { intent: { type: "string", enum: ["answer", "web_search", "edit", "repo_analysis", "trace", "run_checks"] }, query: { type: "string" } }, required: ["intent", "query"] } }
     }) as { response?: unknown; result?: { response?: unknown } };
     const raw = typeof result.response === "string" ? result.response : typeof result.result?.response === "string" ? result.result.response : "";
     const parsed = JSON.parse(extractJson(raw)) as { intent?: NaturalIntent; query?: string };
@@ -260,7 +261,7 @@ async function routeNaturalMessage(chatId: number, text: string, env: Env): Prom
 }
 
 function deterministicNaturalIntent(text: string): NaturalIntent | undefined {
-  const edit = /(?:تغییر|اصلاح|درست|رفع|حل|اضافه|حذف|پاک|جایگزین|تعویض|بازنویسی|پیاده|پیاده‌سازی|commit|push|برطرف|فعال).*(?:کد|پروژه|ریپو|فایل|برنامه|قابلیت|باگ|خطا|نسخه|متن|عبارت|package|code|repo|file|feature|bug|error)|(?:کد|پروژه|ریپو|فایل|برنامه).*(?:تغییر بده|اصلاح کن|درست کن|رفع کن|اضافه کن|حذف کن|جایگزین کن|بساز|پیاده کن|برطرف کن)/iu.test(text);
+  const edit = /(?:تغییر|اصلاح|درست|رفع|حل|اضافه|حذف|پاک|جایگزین|تعویض|بازنویسی|پیاده|پیاده‌سازی|commit|push|برطرف|فعال)(?:\s|‌|$).*(?:کد|پروژه|ریپو|فایل|برنامه|قابلیت|باگ|خطا|نسخه|متن|عبارت|package|code|repo|file|feature|bug|error)|(?:کد|پروژه|ریپو|فایل|برنامه).*(?:تغییر بده|اصلاح کن|درست کن|رفع کن|اضافه کن|حذف کن|جایگزین کن|بساز|پیاده کن|برطرف کن)/iu.test(text);
   if (edit || looksLikeEditRequest(text)) return "edit";
   if (/(?:trace|ردیاب|ردیابی|مسیر اجرا|جریان اجرا|وابستگی|importها?|فلو|flow)/i.test(text)) return "trace";
   if (/(?:test|تست|build|بیلد|lint|workflow|ci|اجرا(?:ی)? تست|بررسی اجرا)/i.test(text)) return "run_checks";
@@ -488,7 +489,7 @@ function needsRepo(question: string): boolean { return /پروژه|ریپو|کد
 function looksLikeEditRequest(question: string): boolean { return /(?:می.?خوام|میخام|می.?خواهم|تغییر بده|عوض کن|جایگزین کن|change|replace|update|modify|set)/i.test(question) && /(?:رو\s+به|به|to|with|به‌جای|instead)/i.test(question); }
 function needsWeb(question: string): boolean { return /اینترنت|وب|سایت|صفحه|لینک|برو داخل|محتوای سایت|جست.?جو|آخرین|اخرین|جدیدترین|امروز|قیمت|خبر|ورژن|نسخه جدید|مستندات|internet|web|site|page|url|link|search|latest|today|news|price|documentation|۲۰۲|202[4-9]|https?:\/\//i.test(question); }
 
-async function projectContext(env: Env): Promise<string> {
+async function projectContext(env: Env, question = ""): Promise<string> {
   let files: string[] = [];
   try {
     const tree = await github(`/repos/${env.GITHUB_REPO}/git/trees/${encodeURIComponent(env.GITHUB_DEFAULT_BRANCH)}?recursive=1`, env) as { tree?: { path: string; type: string }[] };
@@ -497,15 +498,17 @@ async function projectContext(env: Env): Promise<string> {
     const root = await github(`/repos/${env.GITHUB_REPO}/contents?ref=${encodeURIComponent(env.GITHUB_DEFAULT_BRANCH)}`, env) as { path: string; type: string }[];
     files = root.filter(x => x.type === "file").map(x => x.path);
   }
-  const selected = files.filter(path => /(^|\/)(README|package\.json|wrangler\.jsonc?|tsconfig\.json|src\/index\.ts|src\/agent\.ts|\.md$)/i.test(path)).slice(0, 6);
+  const terms = question.toLowerCase().split(/[^\p{L}\p{N}_./-]+/u).filter(term => term.length > 2);
+  const ranked = files.map(path => ({ path, score: terms.reduce((score, term) => score + (path.toLowerCase().includes(term) ? 5 : 0), 0) + (/package\.json|README|wrangler|tsconfig|src\/index|src\/agent|\.md$/i.test(path) ? 1 : 0) })).sort((a, b) => b.score - a.score);
+  const selected = ranked.slice(0, 10).map(item => item.path);
   const snippets: string[] = [];
   for (const path of selected) {
     try {
       const file = await github(`/repos/${env.GITHUB_REPO}/contents/${githubPath(path)}?ref=${encodeURIComponent(env.GITHUB_DEFAULT_BRANCH)}`, env) as GithubFile;
-      if (file.content && file.size < 30000) snippets.push(`FILE: ${path}\n${decodeGithub(file.content)}`);
+      if (file.content && (file.size ?? 0) < 30000) snippets.push(`FILE: ${path}\n${decodeGithub(file.content)}`);
     } catch { /* continue with other files */ }
   }
-  return `PROJECT FILE LIST:\n${files.slice(0, 120).join("\n")}\n\nRELEVANT FILES:\n${snippets.join("\n\n")}`;
+  return `PROJECT FILE LIST:\n${files.slice(0, 160).join("\n")}\n\nRELEVANT FILES SELECTED FOR THIS QUESTION:\n${snippets.join("\n\n")}`;
 }
 
 async function webSearch(question: string): Promise<string> {
