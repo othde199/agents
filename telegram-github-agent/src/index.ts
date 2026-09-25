@@ -685,7 +685,9 @@ async function editCode(chatId: number, instruction: string, env: Env): Promise<
 }
 
 async function generateEditPatch(env: Env, path: string, currentContent: string, instruction: string): Promise<{ content: string; summary: string } | undefined> {
-  const result = await env.AI.run(env.AI_MODEL ?? "@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
+  let result: { response?: unknown; result?: { response?: unknown } };
+  try {
+    result = await env.AI.run(env.AI_MODEL ?? "@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
     messages: [
       { role: "system", content: `${CODING_AGENT_INSTRUCTION}\nبرای ویرایش فقط JSON معتبر تولید کن. هرگز کل فایل را بازنویسی نکن. oldText باید یک قطعه دقیق و موجود در فایل باشد و newText فقط جایگزین همان قطعه باشد. اگر تغییر نیاز به افزودن دارد، oldText را چند خط اطراف محل افزودن و newText را همان خطوط به‌همراه کد جدید قرار بده. اگر مطمئن نیستی، oldText و newText را خالی بگذار. شکل دقیق: {"oldText":"...","newText":"...","summary":"..."}` },
       { role: "user", content: `مسیر واقعی فایل: ${path}\nدرخواست کاربر: ${instruction}\nمحتوای فعلی فایل:\n${currentContent.slice(0, 42000)}` }
@@ -693,20 +695,30 @@ async function generateEditPatch(env: Env, path: string, currentContent: string,
     max_tokens: 1200,
     temperature: 0.1,
     response_format: { type: "json_schema", json_schema: { type: "object", properties: { oldText: { type: "string" }, newText: { type: "string" }, summary: { type: "string" } }, required: ["oldText", "newText", "summary"] } }
-  }) as { response?: unknown; result?: { response?: unknown } };
-  const raw = typeof result.response === "string" ? result.response : typeof result.result?.response === "string" ? result.result.response : "";
+    }) as { response?: unknown; result?: { response?: unknown } };
+  } catch (error) {
+    console.error(JSON.stringify({ event: "edit.patch_model_error", path, message: error instanceof Error ? error.message : "unknown" }));
+    return undefined;
+  }
+  const raw = typeof result.response === "string" ? result.response : typeof result.result?.response === "string" ? result.result.response : result.response && typeof result.response === "object" ? JSON.stringify(result.response) : "";
   try {
     const parsed = JSON.parse(extractJson(raw)) as { oldText?: string; newText?: string; summary?: string };
-    if (!parsed.oldText || typeof parsed.newText !== "string" || !currentContent.includes(parsed.oldText) || countOccurrences(currentContent, parsed.oldText) !== 1) return undefined;
+    if (!parsed.oldText || typeof parsed.newText !== "string" || !currentContent.includes(parsed.oldText)) return undefined;
+    if (countOccurrences(currentContent, parsed.oldText) !== 1) {
+      console.log(JSON.stringify({ event: "edit.patch_rejected_non_unique", path, occurrences: countOccurrences(currentContent, parsed.oldText) }));
+      return undefined;
+    }
     return { content: currentContent.replace(parsed.oldText, parsed.newText), summary: parsed.summary?.slice(0, 300) || `ویرایش ${path}` };
   } catch { return undefined; }
 }
 
 async function locateFileForInstruction(env: Env, branch: string, instruction: string): Promise<{ path: string; file: GithubFile; content: string } | undefined> {
+  const needles = extractSearchNeedles(instruction);
+  const searched = await locateViaGithubCodeSearch(env, branch, needles);
+  if (searched) return searched;
   let tree: { tree?: { path: string; type: string; size?: number }[] };
   try { tree = await github(`/repos/${env.GITHUB_REPO}/git/trees/${encodeURIComponent(branch)}?recursive=1`, env) as { tree?: { path: string; type: string; size?: number }[] }; } catch { return undefined; }
   const candidates = (tree.tree ?? []).filter(item => item.type === "blob" && (item.size ?? 0) < 100000 && /\.(tsx?|jsx?|vue|svelte|html|css|scss|md|json)$/i.test(item.path) && !/(node_modules|dist|build|coverage|\.lock$)/i.test(item.path)).sort((a, b) => (/(src|app|components)/i.test(b.path) ? 1 : 0) - (/(src|app|components)/i.test(a.path) ? 1 : 0)).slice(0, 24);
-  const needles = extractSearchNeedles(instruction);
   for (const candidate of candidates) {
     try {
       const file = await github(`/repos/${env.GITHUB_REPO}/contents/${githubPath(candidate.path)}?ref=${encodeURIComponent(branch)}`, env) as GithubFile;
@@ -714,6 +726,23 @@ async function locateFileForInstruction(env: Env, branch: string, instruction: s
       const normalized = normalizeSearchText(content);
       if (needles.some(needle => normalized.includes(normalizeSearchText(needle)))) return { path: candidate.path, file, content };
     } catch { /* skip inaccessible or binary files */ }
+  }
+  return undefined;
+}
+
+async function locateViaGithubCodeSearch(env: Env, branch: string, needles: string[]): Promise<{ path: string; file: GithubFile; content: string } | undefined> {
+  for (const needle of needles.filter(value => value.length >= 4).slice(0, 2)) {
+    try {
+      const result = await github(`/search/code?q=${encodeURIComponent(`"${needle}" repo:${env.GITHUB_REPO}`)}&per_page=5`, env) as { items?: { path: string }[] };
+      for (const item of result.items ?? []) {
+        if (!safePath(item.path)) continue;
+        try {
+          const file = await github(`/repos/${env.GITHUB_REPO}/contents/${githubPath(item.path)}?ref=${encodeURIComponent(branch)}`, env) as GithubFile;
+          const content = decodeGithub(file.content);
+          if (normalizeSearchText(content).includes(normalizeSearchText(needle))) return { path: item.path, file, content };
+        } catch { /* continue with the next search result */ }
+      }
+    } catch { /* code search may be unavailable; fall back to tree scanning */ }
   }
   return undefined;
 }
@@ -792,10 +821,10 @@ function applyDeterministicEdit(path: string, content: string, instruction: stri
 }
 function applyTextReplacement(content: string, instruction: string): { content: string; summary: string } | undefined {
   const quoted = [...instruction.matchAll(/["“”'`](.{3,200}?)["“”'`]/g)].map(match => match[1].trim());
-  const replacementMatch = instruction.match(/(.{3,240}?)\s+رو\s+به\s+(.+?)(?:\s+(?:تغییر|عوض|کن|بده)|[،,؛;]|$)/i);
-  const oldCandidates = replacementMatch ? [replacementMatch[1], ...quoted] : quoted;
+  const replacementMatch = instruction.match(/(.{3,240}?)\s+(?:رو|را)\s+به\s+(.+?)(?:\s+(?:تغییر|عوض|کن|بده)|[،,؛;]|$)/i);
+  const oldCandidates = quoted.length >= 2 ? [quoted[0], ...quoted.slice(0, -1)] : replacementMatch ? [replacementMatch[1], ...quoted] : quoted;
   const oldText = oldCandidates.map(value => value.replace(/^(?:میخام|می.?خوام|می.?خواهم)\s+/i, "").trim()).sort((a, b) => b.length - a.length).find(value => normalizeSearchText(content).includes(normalizeSearchText(value)));
-  const replacement = replacementMatch?.[2]?.trim() ?? instruction.match(/(?:رو\s+به|به|to)\s+["“”'`]?(.+?)["“”'`]?(?:\s+(?:تغییر|عوض|کن|بده)|$)/i)?.[1]?.trim();
+  const replacement = quoted.length >= 2 ? quoted[quoted.length - 1] : replacementMatch?.[2]?.trim() ?? instruction.match(/(?:رو|را)\s+به\s+["“”'`]?(.+?)["“”'`]?(?:\s+(?:تغییر|عوض|کن|بده)|$)/i)?.[1]?.trim();
   if (!oldText || !replacement) return undefined;
   const newText = replacement.replace(/["“”'`]+$/g, "").trim();
   if (!newText) return undefined;
