@@ -671,14 +671,29 @@ async function editCode(chatId: number, instruction: string, env: Env): Promise<
   const currentContent = located?.path === requestedPath ? located.content : decodeGithub(current.content);
   const deterministic = applyDeterministicEdit(requestedPath, currentContent, instruction);
   const textEdit = applyTextReplacement(currentContent, instruction);
-  const plan = deterministic ? JSON.stringify({ path: requestedPath, content: deterministic.content, summary: deterministic.summary }) : textEdit ? JSON.stringify({ path: requestedPath, content: textEdit.content, summary: textEdit.summary }) : await ai(repoEnv, `${CODING_AGENT_INSTRUCTION}\nفقط یک JSON معتبر و بدون markdown برگردان؛ هیچ توضیحی بیرون JSON ننویس. شکل دقیق: {"path":"${requestedPath}","content":"کل محتوای کامل جدید فایل","summary":"خلاصه کوتاه فارسی"}. مسیر فایل دقیقاً باید ${requestedPath} باشد و content هرگز نباید placeholder باشد.\nمحتوای فعلی فایل:\n${currentContent.slice(0, 50000)}\nدرخواست کاربر: ${instruction}`);
-  let parsed: { path?: string; content?: string; summary?: string };
-  try { parsed = JSON.parse(extractJson(String(plan))); } catch { return sendTelegram(chatId, `مدل نتوانست تغییر فایل را به شکل معتبر تولید کند. محتوای فایل تغییر نکرد.\n${String(plan).slice(0, 1200)}`, env); }
-  if (!parsed.path || typeof parsed.content !== "string") return sendTelegram(chatId, "درخواست مبهم است؛ نام دقیق فایل و تغییر موردنظر را بنویسید.", env);
-  if (parsed.content.includes("کل محتوای جدید فایل") || parsed.path.includes("/" ) && parsed.path.startsWith(activeEnv.GITHUB_REPO)) return sendTelegram(chatId, "خروجی مدل معتبر نبود و برای جلوگیری از خراب‌شدن فایل، Commit انجام نشد.", env);
-  if (!safePath(parsed.path) || parsed.content.length > Number(env.MAX_FILE_BYTES ?? 120000)) return sendTelegram(chatId, "این مسیر یا اندازه فایل مجاز نیست.", env);
-  const result = await github(`/repos/${repoEnv.GITHUB_REPO}/contents/${filePath}`, repoEnv, { method: "PUT", body: JSON.stringify({ message: `feat(bot): ${parsed.summary ?? "update requested from Telegram"}`.slice(0, 120), content: btoa(unescape(encodeURIComponent(parsed.content))), sha: current.sha, branch }) }) as { commit?: { html_url?: string } };
-  return sendTelegram(chatId, `✅ تغییر در گیت‌هاب ثبت شد.\nفایل پیدا‌شده: ${parsed.path}\n${parsed.summary ?? ""}\nCommit: ${result.commit?.html_url ?? "ثبت شد"}`, env);
+  const patch = deterministic ? { content: deterministic.content, summary: deterministic.summary } : textEdit ? { content: textEdit.content, summary: textEdit.summary } : await generateEditPatch(repoEnv, requestedPath, currentContent, instruction);
+  if (!patch || typeof patch.content !== "string" || patch.content === currentContent) return sendTelegram(chatId, "مدل نتوانست Patch معتبر بسازد یا تغییر واقعی ایجاد نشد؛ Commit انجام نشد.", env);
+  if (patch.content.includes("کل محتوای جدید فایل") || patch.content.includes("PLACEHOLDER") || patch.content.length > Number(env.MAX_FILE_BYTES ?? 120000)) return sendTelegram(chatId, "خروجی Patch معتبر نبود یا اندازه فایل مجاز نیست؛ Commit انجام نشد.", env);
+  const result = await github(`/repos/${repoEnv.GITHUB_REPO}/contents/${filePath}`, repoEnv, { method: "PUT", body: JSON.stringify({ message: `feat(bot): ${patch.summary ?? "update requested from Telegram"}`.slice(0, 120), content: btoa(unescape(encodeURIComponent(patch.content))), sha: current.sha, branch }) }) as { commit?: { html_url?: string } };
+  return sendTelegram(chatId, `✅ تغییر در گیت‌هاب ثبت شد.\nفایل پیدا‌شده: ${requestedPath}\n${patch.summary ?? ""}\nCommit: ${result.commit?.html_url ?? "ثبت شد"}`, env);
+}
+
+async function generateEditPatch(env: Env, path: string, currentContent: string, instruction: string): Promise<{ content: string; summary: string } | undefined> {
+  const result = await env.AI.run(env.AI_MODEL ?? "@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
+    messages: [
+      { role: "system", content: `${CODING_AGENT_INSTRUCTION}\nبرای ویرایش فقط JSON معتبر تولید کن. هرگز کل فایل را بازنویسی نکن. oldText باید یک قطعه دقیق و موجود در فایل باشد و newText فقط جایگزین همان قطعه باشد. اگر تغییر نیاز به افزودن دارد، oldText را چند خط اطراف محل افزودن و newText را همان خطوط به‌همراه کد جدید قرار بده. اگر مطمئن نیستی، oldText و newText را خالی بگذار. شکل دقیق: {"oldText":"...","newText":"...","summary":"..."}` },
+      { role: "user", content: `مسیر واقعی فایل: ${path}\nدرخواست کاربر: ${instruction}\nمحتوای فعلی فایل:\n${currentContent.slice(0, 42000)}` }
+    ],
+    max_tokens: 1200,
+    temperature: 0.1,
+    response_format: { type: "json_schema", json_schema: { type: "object", properties: { oldText: { type: "string" }, newText: { type: "string" }, summary: { type: "string" } }, required: ["oldText", "newText", "summary"] } }
+  }) as { response?: unknown; result?: { response?: unknown } };
+  const raw = typeof result.response === "string" ? result.response : typeof result.result?.response === "string" ? result.result.response : "";
+  try {
+    const parsed = JSON.parse(extractJson(raw)) as { oldText?: string; newText?: string; summary?: string };
+    if (!parsed.oldText || typeof parsed.newText !== "string" || !currentContent.includes(parsed.oldText)) return undefined;
+    return { content: currentContent.replace(parsed.oldText, parsed.newText), summary: parsed.summary?.slice(0, 300) || `ویرایش ${path}` };
+  } catch { return undefined; }
 }
 
 async function locateFileForInstruction(env: Env, branch: string, instruction: string): Promise<{ path: string; file: GithubFile; content: string } | undefined> {
