@@ -19,7 +19,7 @@ export interface Env {
   SUPABASE_SERVICE_ROLE_KEY?: string;
 }
 
-type TelegramUpdate = { message?: { chat: { id: number }; text?: string; from?: { id: number } }; callback_query?: { id: string; data?: string; message?: { chat: { id: number } } } };
+type TelegramUpdate = { update_id?: number; message?: { chat: { id: number }; text?: string; from?: { id: number } }; callback_query?: { id: string; data?: string; message?: { chat: { id: number } } } };
 type GithubFile = { content: string; sha: string; encoding: string; size: number };
 type GithubRepo = { full_name: string; private: boolean; html_url: string; default_branch?: string; archived?: boolean };
 type GithubRepoDetails = { full_name: string; default_branch: string };
@@ -82,6 +82,10 @@ export default {
     const chatId = update.message?.chat.id ?? callback?.message?.chat.id;
     const text = update.message?.text?.trim();
     if (!chatId || (!text && !callback) || !isAllowedChat(chatId, env.ALLOWED_CHAT_IDS)) return json({ ok: true });
+    if (typeof update.update_id === "number") {
+      const duplicate = await (await stateForChat(env, chatId).fetch("https://bot-state/dedupe", { method: "POST", body: JSON.stringify({ updateId: update.update_id }) })).json() as { duplicate?: boolean };
+      if (duplicate.duplicate) return json({ ok: true, duplicate: true });
+    }
     if (callback) {
       await answerCallback(callback.id, env);
       if (callback.data?.startsWith("repoidx:")) {
@@ -662,6 +666,7 @@ async function editCode(chatId: number, instruction: string, env: Env): Promise<
   const branch = details.default_branch || activeEnv.GITHUB_DEFAULT_BRANCH;
   const repoEnv = { ...activeEnv, GITHUB_DEFAULT_BRANCH: branch };
   const explicitPath = extractRequestedPath(instruction);
+  if (explicitPath && !safePath(explicitPath)) return sendTelegram(chatId, "مسیر فایل مجاز نیست یا خارج از ریپوی انتخاب‌شده است؛ Commit انجام نشد.", env);
   const located = explicitPath ? undefined : await locateFileForInstruction(repoEnv, branch, instruction);
   const selectedPath = explicitPath ?? located?.path ?? await chooseFileForInstruction(repoEnv, branch, instruction);
   const requestedPath = selectedPath;
@@ -669,6 +674,7 @@ async function editCode(chatId: number, instruction: string, env: Env): Promise<
   const filePath = githubPath(requestedPath);
   const current = located?.path === requestedPath ? located.file : await github(`/repos/${repoEnv.GITHUB_REPO}/contents/${filePath}?ref=${encodeURIComponent(branch)}`, repoEnv) as GithubFile;
   const currentContent = located?.path === requestedPath ? located.content : decodeGithub(current.content);
+  console.log(JSON.stringify({ event: "edit.file_selected", repo: repoEnv.GITHUB_REPO, path: requestedPath, bytes: currentContent.length, explicit: Boolean(explicitPath) }));
   const deterministic = applyDeterministicEdit(requestedPath, currentContent, instruction);
   const textEdit = applyTextReplacement(currentContent, instruction);
   const patch = deterministic ? { content: deterministic.content, summary: deterministic.summary } : textEdit ? { content: textEdit.content, summary: textEdit.summary } : await generateEditPatch(repoEnv, requestedPath, currentContent, instruction);
@@ -691,7 +697,7 @@ async function generateEditPatch(env: Env, path: string, currentContent: string,
   const raw = typeof result.response === "string" ? result.response : typeof result.result?.response === "string" ? result.result.response : "";
   try {
     const parsed = JSON.parse(extractJson(raw)) as { oldText?: string; newText?: string; summary?: string };
-    if (!parsed.oldText || typeof parsed.newText !== "string" || !currentContent.includes(parsed.oldText)) return undefined;
+    if (!parsed.oldText || typeof parsed.newText !== "string" || !currentContent.includes(parsed.oldText) || countOccurrences(currentContent, parsed.oldText) !== 1) return undefined;
     return { content: currentContent.replace(parsed.oldText, parsed.newText), summary: parsed.summary?.slice(0, 300) || `ویرایش ${path}` };
   } catch { return undefined; }
 }
@@ -731,6 +737,7 @@ function extractSearchNeedles(instruction: string): string[] {
   return [...new Set([...quoted, ...english, beforeTo].map(value => value.replace(/^(?:میخام|می.?خوام|می.?خواهم)\s+/i, "").trim()).filter(value => value.length >= 4))];
 }
 function normalizeSearchText(value: string): string { return value.toLowerCase().replace(/[“”’`"]+/g, "'").replace(/\s+/g, " ").trim(); }
+function countOccurrences(value: string, needle: string): number { let count = 0, start = 0; while (true) { const index = value.indexOf(needle, start); if (index < 0) return count; count++; start = index + needle.length; } }
 
 async function ai(env: Env, prompt: string, history: ConversationMessage[] = []): Promise<string> {
   const messages = [{ role: "system" as const, content: "تو یک ایجنت حرفه‌ای برنامه‌نویسی هستی. قبل از پاسخ context را دقیق بررسی کن، حدس نزن، مسیر فایل‌ها و تغییرات را دقیق نگه دار، و هرگز secret یا توکن تولید یا افشا نکن. اگر اطلاعات کافی نیست، سؤال روشن‌کننده بپرس." }, ...history.slice(-8), { role: "user" as const, content: prompt }];
@@ -841,6 +848,15 @@ export class BotState {
     if (path === "/pending" && request.method === "POST") {
       const body = await request.json() as { action?: string };
       await this.state.storage.put("pending", body.action ?? "");
+    }
+    if (path === "/dedupe" && request.method === "POST") {
+      const body = await request.json() as { updateId?: number };
+      const updateId = body.updateId;
+      if (!Number.isSafeInteger(updateId)) return json({ duplicate: false });
+      const key = `telegram:update:${updateId}`;
+      if (await this.state.storage.get<boolean>(key)) return json({ duplicate: true });
+      await this.state.storage.put(key, true);
+      return json({ duplicate: false });
     }
     if (path === "/pending" && request.method === "DELETE") await this.state.storage.delete("pending");
     if (path === "/pending" && request.method === "GET") return json({ action: await this.state.storage.get<string>("pending") });
