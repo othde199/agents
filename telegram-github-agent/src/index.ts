@@ -686,11 +686,14 @@ async function editCode(chatId: number, instruction: string, env: Env): Promise<
 
 async function generateEditPatch(env: Env, path: string, currentContent: string, instruction: string): Promise<{ content: string; summary: string } | undefined> {
   let result: { response?: unknown; result?: { response?: unknown } };
+  const model = env.AI_MODEL ?? "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
+  const system = `${CODING_AGENT_INSTRUCTION}\nبرای ویرایش فقط JSON معتبر تولید کن. هرگز کل فایل را بازنویسی نکن. oldText باید یک قطعه دقیق و موجود در فایل باشد و newText فقط جایگزین همان قطعه باشد. اگر تغییر نیاز به افزودن دارد، oldText را چند خط اطراف محل افزودن و newText را همان خطوط به‌همراه کد جدید قرار بده. اگر مطمئن نیستی، oldText و newText را خالی بگذار. شکل دقیق: {"oldText":"...","newText":"...","summary":"..."}`;
+  const user = `مسیر واقعی فایل: ${path}\nدرخواست کاربر: ${instruction}\nمحتوای فعلی فایل:\n${currentContent.slice(0, 42000)}`;
   try {
-    result = await env.AI.run(env.AI_MODEL ?? "@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
+    result = await env.AI.run(model, {
     messages: [
-      { role: "system", content: `${CODING_AGENT_INSTRUCTION}\nبرای ویرایش فقط JSON معتبر تولید کن. هرگز کل فایل را بازنویسی نکن. oldText باید یک قطعه دقیق و موجود در فایل باشد و newText فقط جایگزین همان قطعه باشد. اگر تغییر نیاز به افزودن دارد، oldText را چند خط اطراف محل افزودن و newText را همان خطوط به‌همراه کد جدید قرار بده. اگر مطمئن نیستی، oldText و newText را خالی بگذار. شکل دقیق: {"oldText":"...","newText":"...","summary":"..."}` },
-      { role: "user", content: `مسیر واقعی فایل: ${path}\nدرخواست کاربر: ${instruction}\nمحتوای فعلی فایل:\n${currentContent.slice(0, 42000)}` }
+      { role: "system", content: system },
+      { role: "user", content: user }
     ],
     max_tokens: 1200,
     temperature: 0.1,
@@ -700,9 +703,23 @@ async function generateEditPatch(env: Env, path: string, currentContent: string,
     console.error(JSON.stringify({ event: "edit.patch_model_error", path, message: error instanceof Error ? error.message : "unknown" }));
     return undefined;
   }
-  const raw = typeof result.response === "string" ? result.response : typeof result.result?.response === "string" ? result.result.response : result.response && typeof result.response === "object" ? JSON.stringify(result.response) : "";
+  const parse = (value: unknown): { oldText?: string; newText?: string; summary?: string } | undefined => {
+    try {
+      const raw = typeof value === "string" ? value : value && typeof value === "object" ? JSON.stringify(value) : "";
+      return JSON.parse(extractJson(raw)) as { oldText?: string; newText?: string; summary?: string };
+    } catch { return undefined; }
+  };
+  let parsed = parse(result.response ?? result.result?.response);
+  if (!parsed?.oldText || typeof parsed.newText !== "string" || !currentContent.includes(parsed.oldText)) {
+    try {
+      const retry = await env.AI.run(model, { messages: [{ role: "system", content: `${system}\nبدون response_format پاسخ بده و فقط یک JSON کوچک در یک خط تولید کن.` }, { role: "user", content: user }], max_tokens: 900, temperature: 0 }) as { response?: unknown; result?: { response?: unknown } };
+      parsed = parse(retry.response ?? retry.result?.response);
+    } catch (error) {
+      console.error(JSON.stringify({ event: "edit.patch_retry_error", path, message: error instanceof Error ? error.message : "unknown" }));
+    }
+  }
   try {
-    const parsed = JSON.parse(extractJson(raw)) as { oldText?: string; newText?: string; summary?: string };
+    if (!parsed) return undefined;
     if (!parsed.oldText || typeof parsed.newText !== "string" || !currentContent.includes(parsed.oldText)) return undefined;
     if (countOccurrences(currentContent, parsed.oldText) !== 1) {
       console.log(JSON.stringify({ event: "edit.patch_rejected_non_unique", path, occurrences: countOccurrences(currentContent, parsed.oldText) }));
